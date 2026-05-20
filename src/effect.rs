@@ -81,13 +81,18 @@ impl RainEngine {
                 };
                 let trail = (1.0 - distance as f64 / fade_length).clamp(0.0, 1.0);
                 let column_enabled = density >= self.column_noise(x);
-                let brightness = if column_enabled { trail } else { 0.0 };
-                let glyph = self.glyph_for(x, y, glyph_churn);
+                let brightness = if column_enabled { trail } else { 0.0 } * state.brightness;
+                let brightness_bucket = bucket(brightness);
+                let glyph = if brightness_bucket == 0 {
+                    ' '
+                } else {
+                    self.glyph_for(x, y, glyph_churn)
+                };
 
                 cells.push(RenderCell {
                     glyph,
                     color_hotness_bucket: hotness,
-                    brightness_bucket: bucket(brightness * state.brightness),
+                    brightness_bucket,
                 });
             }
         }
@@ -173,5 +178,18 @@ mod tests {
         let second_frame = second.step(EffectState::default());
 
         assert_eq!(first_frame, second_frame);
+    }
+
+    #[test]
+    fn inactive_background_cells_are_spaces() {
+        let mut engine = RainEngine::new(8, 4, 7);
+        let state = EffectState {
+            density: 0.0,
+            ..EffectState::default()
+        };
+
+        let frame = engine.step(state);
+
+        assert!(frame.cells.iter().all(|cell| cell.glyph == ' '));
     }
 }
