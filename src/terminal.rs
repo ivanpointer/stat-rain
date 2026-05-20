@@ -1,3 +1,6 @@
+use crate::effect::{Frame, RenderCell};
+use std::io::{Result, Write};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorMode {
     TrueColor,
@@ -45,6 +48,68 @@ impl TerminalCapabilities {
     }
 }
 
+pub fn write_enter(mut output: impl Write, alternate_screen: bool) -> Result<()> {
+    if alternate_screen {
+        write!(output, "\x1b[?1049h")?;
+    }
+    write!(output, "\x1b[?25l")?;
+    output.flush()
+}
+
+pub fn write_exit(mut output: impl Write, alternate_screen: bool) -> Result<()> {
+    write!(output, "\x1b[?25h")?;
+    if alternate_screen {
+        write!(output, "\x1b[?1049l")?;
+    }
+    output.flush()
+}
+
+pub fn write_frame(mut output: impl Write, frame: &Frame, color_mode: ColorMode) -> Result<()> {
+    for y in 0..frame.height {
+        for x in 0..frame.width {
+            let index = y * frame.width + x;
+            let cell = &frame.cells[index];
+            write!(output, "\x1b[{};{}H", y + 1, x + 1)?;
+            write_color(&mut output, cell, color_mode)?;
+            write!(output, "{}", cell.glyph)?;
+        }
+    }
+    write!(output, "\x1b[0m")?;
+    output.flush()
+}
+
+fn write_color(mut output: impl Write, cell: &RenderCell, color_mode: ColorMode) -> Result<()> {
+    match color_mode {
+        ColorMode::TrueColor => {
+            let hot = cell.color_hotness_bucket;
+            let green = cell.brightness_bucket;
+            let red = hot.max(green / 3);
+            let blue = green / 5;
+            write!(output, "\x1b[38;2;{red};{green};{blue}m")
+        }
+        ColorMode::Ansi256 => {
+            let color = if cell.color_hotness_bucket > 170 {
+                196
+            } else if cell.color_hotness_bucket > 84 {
+                226
+            } else {
+                46
+            };
+            write!(output, "\x1b[38;5;{color}m")
+        }
+        ColorMode::Ansi16 => {
+            let color = if cell.color_hotness_bucket > 170 {
+                31
+            } else if cell.color_hotness_bucket > 84 {
+                33
+            } else {
+                32
+            };
+            write!(output, "\x1b[{color}m")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,5 +130,47 @@ mod tests {
 
         assert_eq!(caps.color_mode, ColorMode::Ansi256);
         assert!(caps.tmux);
+    }
+
+    #[test]
+    fn lifecycle_writes_alternate_screen_and_cursor_sequences() {
+        let mut output = Vec::new();
+
+        write_enter(&mut output, true).unwrap();
+        write_exit(&mut output, true).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "\x1b[?1049h\x1b[?25l\x1b[?25h\x1b[?1049l"
+        );
+    }
+
+    #[test]
+    fn frame_renderer_writes_positioned_cells() {
+        let frame = Frame {
+            width: 2,
+            height: 1,
+            cells: vec![
+                RenderCell {
+                    glyph: '0',
+                    color_hotness_bucket: 0,
+                    brightness_bucket: 255,
+                },
+                RenderCell {
+                    glyph: '1',
+                    color_hotness_bucket: 255,
+                    brightness_bucket: 128,
+                },
+            ],
+        };
+        let mut output = Vec::new();
+
+        write_frame(&mut output, &frame, ColorMode::Ansi16).unwrap();
+
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("\x1b[1;1H"));
+        assert!(rendered.contains('0'));
+        assert!(rendered.contains("\x1b[1;2H"));
+        assert!(rendered.contains('1'));
     }
 }
