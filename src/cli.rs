@@ -29,6 +29,24 @@ pub struct RunArgs {
 
     #[arg(long = "map")]
     pub mappings: Vec<String>,
+
+    #[arg(long)]
+    pub frames: Option<u64>,
+
+    #[arg(long = "frame-delay-ms", default_value_t = 33)]
+    pub frame_delay_ms: u64,
+
+    #[arg(long)]
+    pub width: Option<usize>,
+
+    #[arg(long)]
+    pub height: Option<usize>,
+
+    #[arg(long = "no-alt-screen")]
+    pub no_alt_screen: bool,
+
+    #[arg(long)]
+    pub ascii: bool,
 }
 
 #[derive(Debug, Args)]
