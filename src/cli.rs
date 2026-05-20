@@ -39,7 +39,7 @@ pub struct RunArgs {
     #[arg(long = "metric-sample-ms", default_value_t = 1_000)]
     pub metric_sample_ms: u64,
 
-    #[arg(long = "effect-smoothing-ms", default_value_t = 2_000)]
+    #[arg(long = "effect-smoothing-ms", default_value_t = 10_000)]
     pub effect_smoothing_ms: u64,
 
     #[arg(long)]
