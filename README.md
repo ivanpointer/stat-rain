@@ -56,10 +56,12 @@ In another pane:
 cargo run -- send --socket /tmp/stat-rain.sock --metric cpu --value 0.02
 cargo run -- send --socket /tmp/stat-rain.sock --metric cpu --value 0.99
 cargo run -- send --socket /tmp/stat-rain.sock --metric cpu --value 0.50
+cargo run -- send --socket /tmp/stat-rain.sock --message "BUILD OK"
 ```
 
 The pushed `cpu` metric also updates `cpu.total`, and external values stay
 authoritative over built-in CPU samples until another value is pushed.
+Pushed messages render as a short-lived bright overlay in the rain.
 
 `devbox` provides the project toolchain when available:
 

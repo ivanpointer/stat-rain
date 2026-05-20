@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use stat_rain::cli::{Cli, Command, RunArgs, SendArgs, StressCpuArgs};
 use stat_rain::config::AppConfig;
 use stat_rain::dev_tools;
-use stat_rain::effect::{EffectSmoother, GlyphSet};
+use stat_rain::effect::{apply_message_overlay, EffectSmoother, GlyphSet, MessageOverlay};
 use stat_rain::metrics::{MetricProvider, MetricRegistry, MetricValue};
 use stat_rain::protocol::{self, ProtocolMessage};
 use stat_rain::system_metrics::BuiltinSystemProvider;
@@ -71,6 +71,7 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
     let simulated_metrics = dev_tools::parse_simulated_metrics(&args.simulated_metrics)?;
     let mut metrics = initial_metric_registry();
     let mut external_overrides = ExternalMetricOverrides::default();
+    let mut active_message: Option<MessageOverlay> = None;
     let mut provider = BuiltinSystemProvider::new();
     sample_builtin_metrics(&mut provider, &mut metrics);
     dev_tools::apply_simulated_metrics(&mut metrics, &simulated_metrics);
@@ -101,7 +102,12 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
         if interrupted.load(Ordering::Relaxed) {
             break;
         }
-        drain_socket_messages(&socket_input, &mut metrics, &mut external_overrides);
+        drain_socket_messages(
+            &socket_input,
+            &mut metrics,
+            &mut external_overrides,
+            &mut active_message,
+        );
         if last_metric_sample.elapsed() >= metric_interval {
             sample_builtin_metrics(&mut provider, &mut metrics);
             dev_tools::apply_simulated_metrics(&mut metrics, &simulated_metrics);
@@ -123,7 +129,14 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
             renderer.clear();
             terminal::write_clear(&mut *output)?;
         }
-        let frame = engine.step(state);
+        let mut frame = engine.step(state);
+        if let Some(message) = active_message.as_mut() {
+            apply_message_overlay(&mut frame, message, state.message_reveal_intensity);
+            message.advance();
+            if message.is_expired() {
+                active_message = None;
+            }
+        }
         renderer.write_frame(&mut *output, &frame)?;
         if !delay.is_zero() {
             thread::sleep(delay);
@@ -192,12 +205,13 @@ fn drain_socket_messages(
     socket_input: &Option<SocketInput>,
     metrics: &mut MetricRegistry,
     overrides: &mut ExternalMetricOverrides,
+    active_message: &mut Option<MessageOverlay>,
 ) {
     let Some(socket_input) = socket_input else {
         return;
     };
     while let Ok(message) = socket_input.receiver.try_recv() {
-        apply_protocol_message(metrics, overrides, message);
+        apply_protocol_message(metrics, overrides, active_message, message);
     }
 }
 
@@ -222,6 +236,7 @@ fn message_from_send_args(args: &SendArgs) -> Result<ProtocolMessage> {
 fn apply_protocol_message(
     metrics: &mut MetricRegistry,
     overrides: &mut ExternalMetricOverrides,
+    active_message: &mut Option<MessageOverlay>,
     message: ProtocolMessage,
 ) {
     match message {
@@ -238,7 +253,9 @@ fn apply_protocol_message(
             overrides.mark_stale(name);
             overrides.apply_to(metrics);
         }
-        ProtocolMessage::TextInjection { .. } => {}
+        ProtocolMessage::TextInjection { text } => {
+            *active_message = Some(MessageOverlay::new(text, 180, 0x5445_5854));
+        }
     }
 }
 
@@ -332,19 +349,34 @@ mod tests {
     fn external_cpu_metric_update_persists_as_total_override() {
         let mut metrics = initial_metric_registry();
         let mut overrides = ExternalMetricOverrides::default();
+        let mut active_message = None;
         let message = stat_rain::protocol::ProtocolMessage::MetricUpdate {
             name: "cpu".to_string(),
             raw: None,
             normalized: Some(0.99),
         };
 
-        apply_protocol_message(&mut metrics, &mut overrides, message);
+        apply_protocol_message(&mut metrics, &mut overrides, &mut active_message, message);
         metrics.set("cpu", MetricValue::new(None, Some(0.01)));
         metrics.set("cpu.total", MetricValue::new(None, Some(0.01)));
         overrides.apply_to(&mut metrics);
 
         assert_eq!(metrics.get("cpu").unwrap().normalized, Some(0.99));
         assert_eq!(metrics.get("cpu.total").unwrap().normalized, Some(0.99));
+    }
+
+    #[test]
+    fn text_injection_sets_active_message_overlay() {
+        let mut metrics = initial_metric_registry();
+        let mut overrides = ExternalMetricOverrides::default();
+        let mut active_message = None;
+        let message = stat_rain::protocol::ProtocolMessage::TextInjection {
+            text: "BUILD OK".to_string(),
+        };
+
+        apply_protocol_message(&mut metrics, &mut overrides, &mut active_message, message);
+
+        assert_eq!(active_message.unwrap().text, "BUILD OK");
     }
 }
 

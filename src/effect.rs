@@ -132,6 +132,62 @@ pub struct Frame {
     pub cells: Vec<RenderCell>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageOverlay {
+    pub text: String,
+    pub age: u64,
+    pub lifetime: u64,
+    seed: u64,
+}
+
+impl MessageOverlay {
+    pub fn new(text: String, lifetime: u64, seed: u64) -> Self {
+        Self {
+            text,
+            age: 0,
+            lifetime: lifetime.max(1),
+            seed,
+        }
+    }
+
+    pub fn advance(&mut self) {
+        self.age = self.age.saturating_add(1);
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.age >= self.lifetime
+    }
+}
+
+pub fn apply_message_overlay(frame: &mut Frame, message: &MessageOverlay, intensity: f64) {
+    if frame.width == 0 || frame.height == 0 || message.is_expired() {
+        return;
+    }
+
+    let visible_chars = message.text.chars().take(frame.width).collect::<Vec<_>>();
+    if visible_chars.is_empty() {
+        return;
+    }
+
+    let row = message.seed as usize % frame.height;
+    let start_x = frame.width.saturating_sub(visible_chars.len()) / 2;
+    let fade = 1.0 - message.age as f64 / message.lifetime as f64;
+    let brightness = fade * (0.65 + intensity.clamp(0.0, 1.0) * 0.35);
+    let brightness_bucket = bucket(brightness);
+
+    for (offset, glyph) in visible_chars.into_iter().enumerate() {
+        if glyph == ' ' {
+            continue;
+        }
+        let index = row * frame.width + start_x + offset;
+        let cell = &mut frame.cells[index];
+        cell.glyph = glyph;
+        cell.brightness_bucket = cell.brightness_bucket.max(brightness_bucket);
+        cell.head_brightness_bucket = cell.head_brightness_bucket.max(brightness_bucket);
+        cell.ember_brightness_bucket = 0;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RainEngine {
     width: usize,
@@ -792,6 +848,58 @@ mod tests {
     }
 
     #[test]
+    fn message_overlay_writes_text_into_frame() {
+        let mut frame = Frame {
+            width: 12,
+            height: 5,
+            cells: vec![blank_cell(); 60],
+        };
+        let message = MessageOverlay::new("ALERT".to_string(), 120, 7);
+
+        apply_message_overlay(&mut frame, &message, 0.0);
+
+        let rendered = frame
+            .cells
+            .iter()
+            .filter(|cell| cell.head_brightness_bucket > 0)
+            .map(|cell| cell.glyph)
+            .collect::<String>();
+        assert_eq!(rendered, "ALERT");
+    }
+
+    #[test]
+    fn message_overlay_fades_with_age() {
+        let mut fresh_frame = Frame {
+            width: 12,
+            height: 5,
+            cells: vec![blank_cell(); 60],
+        };
+        let mut faded_frame = fresh_frame.clone();
+        let fresh = MessageOverlay::new("A".to_string(), 120, 7);
+        let faded = MessageOverlay {
+            age: 90,
+            ..fresh.clone()
+        };
+
+        apply_message_overlay(&mut fresh_frame, &fresh, 0.0);
+        apply_message_overlay(&mut faded_frame, &faded, 0.0);
+
+        let fresh_brightness = fresh_frame
+            .cells
+            .iter()
+            .find(|cell| cell.glyph == 'A')
+            .unwrap()
+            .head_brightness_bucket;
+        let faded_brightness = faded_frame
+            .cells
+            .iter()
+            .find(|cell| cell.glyph == 'A')
+            .unwrap()
+            .head_brightness_bucket;
+        assert!(fresh_brightness > faded_brightness);
+    }
+
+    #[test]
     fn column_heads_drift_independently_over_time() {
         let mut engine = RainEngine::new(2, 32, 7);
         let state = EffectState {
@@ -961,6 +1069,17 @@ mod tests {
             current - previous
         } else {
             height - previous + current
+        }
+    }
+
+    fn blank_cell() -> RenderCell {
+        RenderCell {
+            glyph: ' ',
+            color_hotness_bucket: 0,
+            brightness_bucket: 0,
+            head_brightness_bucket: 0,
+            ember_brightness_bucket: 0,
+            ember_color_hotness_bucket: 0,
         }
     }
 }
