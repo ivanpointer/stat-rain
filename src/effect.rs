@@ -107,13 +107,12 @@ impl RainEngine {
 
     fn glyph_for(&self, x: usize, y: usize, glyph_churn: f64) -> char {
         const GLYPHS: &[char] = &[
-            '0', '1', '3', '7', '9', 'a', 'b', 'x', 'z', 'ﾊ', 'ﾐ', 'ﾋ', 'ｰ', 'ｳ', 'ｼ', 'ﾅ',
-            'ﾓ', 'ﾆ',
+            '0', '1', '3', '7', '9', 'a', 'b', 'x', 'z', 'ﾊ', 'ﾐ', 'ﾋ', 'ｰ', 'ｳ', 'ｼ', 'ﾅ', 'ﾓ',
+            'ﾆ',
         ];
 
         let churn = (glyph_churn * 32.0) as u64;
-        let index = (x as u64 * 17 + y as u64 * 31 + self.tick * churn + self.rng.seed)
-            as usize
+        let index = (x as u64 * 17 + y as u64 * 31 + self.tick * churn + self.rng.seed) as usize
             % GLYPHS.len();
         GLYPHS[index]
     }

@@ -1,5 +1,5 @@
-use crate::mapping::{MappingExpression, VisualAttribute};
 use crate::effect::EffectState;
+use crate::mapping::{MappingExpression, VisualAttribute};
 use crate::metrics::MetricRegistry;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
