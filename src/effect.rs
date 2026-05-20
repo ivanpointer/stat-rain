@@ -103,10 +103,10 @@ impl Default for EffectState {
             density: 0.35,
             color_hotness: 0.0,
             brightness: 0.8,
-            fade_length: 8.0,
+            fade_length: 14.0,
             glyph_churn: 0.25,
             message_reveal_intensity: 0.0,
-            ember_density: 0.015,
+            ember_density: 0.0075,
             ember_brightness: 0.9,
             ember_color_hotness: 0.0,
             ember_fade_length: 40.0,
@@ -271,7 +271,12 @@ impl RainEngine {
 
         let hash = self.cell_hash(x, y);
         let age = self.ember_age(x, y, density).unwrap_or(0);
-        let phase = age / 16;
+        let period = ember_period(density);
+        let phase = if mix_hash(hash / period) & 1 == 0 {
+            0
+        } else {
+            age / 24
+        };
         glyphs[hash.wrapping_add(phase.wrapping_mul(7)) as usize % glyphs.len()]
     }
 
@@ -311,6 +316,15 @@ impl RainEngine {
 fn ember_period(density: f64) -> u64 {
     let density = density.clamp(0.0, 1.0);
     (16384.0 - density * 16256.0).round().max(128.0) as u64
+}
+
+fn mix_hash(value: u64) -> u64 {
+    let mut mixed = value;
+    mixed ^= mixed >> 30;
+    mixed = mixed.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed ^= mixed >> 27;
+    mixed = mixed.wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^ (mixed >> 31)
 }
 
 #[derive(Debug, Clone)]
@@ -396,6 +410,8 @@ mod tests {
         let mut engine = RainEngine::new(24, 12, 7);
         let state = EffectState {
             density: 1.0,
+            ember_density: 1.0,
+            ember_fade_length: 4.0,
             fade_length: 1.0,
             brightness: 1.0,
             speed: 0.0,
@@ -417,12 +433,32 @@ mod tests {
     fn default_embers_are_rare_and_slow_fading() {
         let state = EffectState::default();
 
-        assert_eq!(state.ember_density, 0.015);
+        assert_eq!(state.ember_density, 0.0075);
         assert_eq!(state.ember_fade_length, 40.0);
     }
 
     #[test]
-    fn ember_glyph_changes_seldom_during_full_fade_window() {
+    fn default_rain_trail_fades_slowly_without_filling_column() {
+        let mut engine = RainEngine::new(1, 24, 7);
+        let state = EffectState {
+            density: 1.0,
+            ember_density: 0.0,
+            speed: 0.0,
+            ..EffectState::default()
+        };
+
+        let frame = engine.step(state);
+        let visible_cells = frame
+            .cells
+            .iter()
+            .filter(|cell| cell.brightness_bucket > 0)
+            .count();
+
+        assert!((10..20).contains(&visible_cells));
+    }
+
+    #[test]
+    fn about_half_of_ember_glyphs_never_change_during_full_fade_window() {
         let mut engine = RainEngine::new(120, 40, 7);
         let state = EffectState {
             density: 0.0,
@@ -436,30 +472,40 @@ mod tests {
         };
 
         let first_frame = engine.step(state);
-        let index = first_frame
+        let ember_indices = first_frame
             .cells
             .iter()
-            .position(|cell| cell.ember_brightness_bucket == 255)
-            .expect("expected a newly visible ember");
-        let first_glyph = first_frame.cells[index].glyph;
-        let mut changes = 0;
-        let mut previous = first_glyph;
+            .enumerate()
+            .filter_map(|(index, cell)| (cell.ember_brightness_bucket == 255).then_some(index))
+            .collect::<Vec<_>>();
+        assert!(ember_indices.len() >= 12);
+        let mut previous_glyphs = ember_indices
+            .iter()
+            .map(|index| first_frame.cells[*index].glyph)
+            .collect::<Vec<_>>();
+        let mut changes = vec![0; ember_indices.len()];
 
         for _ in 0..39 {
             let frame = engine.step(state);
-            let cell = &frame.cells[index];
-            if cell.ember_brightness_bucket == 0 {
-                break;
-            }
-            if cell.glyph != previous {
-                changes += 1;
-                previous = cell.glyph;
+            for (ember_index, cell_index) in ember_indices.iter().enumerate() {
+                let cell = &frame.cells[*cell_index];
+                if cell.ember_brightness_bucket == 0 {
+                    continue;
+                }
+                if cell.glyph != previous_glyphs[ember_index] {
+                    changes[ember_index] += 1;
+                    previous_glyphs[ember_index] = cell.glyph;
+                }
             }
         }
 
+        let unchanged = changes.iter().filter(|count| **count == 0).count();
+        let changed = changes.iter().filter(|count| **count > 0).count();
+
+        assert!(unchanged.abs_diff(changed) <= ember_indices.len() / 8);
         assert!(
-            (1..=3).contains(&changes),
-            "ember glyph changed {changes} times"
+            changes.iter().all(|count| *count <= 1),
+            "ember glyph changes were {changes:?}"
         );
     }
 
