@@ -142,7 +142,11 @@ fn write_cell(
     write!(output, "{}", cell.glyph)
 }
 
-pub fn write_full_frame(mut output: impl Write, frame: &Frame, color_mode: ColorMode) -> Result<()> {
+pub fn write_full_frame(
+    mut output: impl Write,
+    frame: &Frame,
+    color_mode: ColorMode,
+) -> Result<()> {
     for y in 0..frame.height {
         for x in 0..frame.width {
             let index = y * frame.width + x;
@@ -313,15 +317,41 @@ mod tests {
 
     #[test]
     fn resolves_terminal_size_from_overrides() {
-        let size = resolve_terminal_size(Some(100), Some(40), TerminalSize { width: 80, height: 24 });
+        let size = resolve_terminal_size(
+            Some(100),
+            Some(40),
+            TerminalSize {
+                width: 80,
+                height: 24,
+            },
+        );
 
-        assert_eq!(size, TerminalSize { width: 100, height: 40 });
+        assert_eq!(
+            size,
+            TerminalSize {
+                width: 100,
+                height: 40
+            }
+        );
     }
 
     #[test]
     fn resolves_terminal_size_from_fallback() {
-        let size = resolve_terminal_size(None, None, TerminalSize { width: 80, height: 24 });
+        let size = resolve_terminal_size(
+            None,
+            None,
+            TerminalSize {
+                width: 80,
+                height: 24,
+            },
+        );
 
-        assert_eq!(size, TerminalSize { width: 80, height: 24 });
+        assert_eq!(
+            size,
+            TerminalSize {
+                width: 80,
+                height: 24
+            }
+        );
     }
 }

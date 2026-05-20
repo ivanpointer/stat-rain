@@ -6,8 +6,8 @@ use stat_rain::metrics::{MetricRegistry, MetricValue};
 use stat_rain::terminal::{self, FrameRenderer, TerminalCapabilities, TerminalSize};
 use std::fs;
 use std::io::{self, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
