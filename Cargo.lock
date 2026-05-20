@@ -687,6 +687,7 @@ dependencies = [
  "anyhow",
  "clap",
  "criterion",
+ "libc",
  "serde",
  "tempfile",
  "toml",

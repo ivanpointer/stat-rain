@@ -1,5 +1,7 @@
 use crate::effect::{Frame, RenderCell};
 use std::io::{Result, Write};
+use std::mem::MaybeUninit;
+use std::os::fd::RawFd;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorMode {
@@ -20,6 +22,19 @@ pub struct TerminalCapabilities {
     pub glyph_mode: GlyphMode,
     pub alternate_screen: bool,
     pub tmux: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSize {
+    pub width: usize,
+    pub height: usize,
+}
+
+impl TerminalSize {
+    pub const DEFAULT: Self = Self {
+        width: 80,
+        height: 24,
+    };
 }
 
 impl TerminalCapabilities {
@@ -76,6 +91,39 @@ pub fn write_frame(mut output: impl Write, frame: &Frame, color_mode: ColorMode)
     }
     write!(output, "\x1b[0m")?;
     output.flush()
+}
+
+pub fn resolve_terminal_size(
+    width: Option<usize>,
+    height: Option<usize>,
+    fallback: TerminalSize,
+) -> TerminalSize {
+    TerminalSize {
+        width: width.unwrap_or(fallback.width).max(1),
+        height: height.unwrap_or(fallback.height).max(1),
+    }
+}
+
+pub fn detect_terminal_size() -> Option<TerminalSize> {
+    detect_terminal_size_from_fd(libc::STDOUT_FILENO)
+}
+
+pub fn detect_terminal_size_from_fd(fd: RawFd) -> Option<TerminalSize> {
+    let mut winsize = MaybeUninit::<libc::winsize>::zeroed();
+    let result = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, winsize.as_mut_ptr()) };
+    if result != 0 {
+        return None;
+    }
+
+    let winsize = unsafe { winsize.assume_init() };
+    if winsize.ws_col == 0 || winsize.ws_row == 0 {
+        return None;
+    }
+
+    Some(TerminalSize {
+        width: winsize.ws_col as usize,
+        height: winsize.ws_row as usize,
+    })
 }
 
 fn write_color(mut output: impl Write, cell: &RenderCell, color_mode: ColorMode) -> Result<()> {
@@ -172,5 +220,19 @@ mod tests {
         assert!(rendered.contains('0'));
         assert!(rendered.contains("\x1b[1;2H"));
         assert!(rendered.contains('1'));
+    }
+
+    #[test]
+    fn resolves_terminal_size_from_overrides() {
+        let size = resolve_terminal_size(Some(100), Some(40), TerminalSize { width: 80, height: 24 });
+
+        assert_eq!(size, TerminalSize { width: 100, height: 40 });
+    }
+
+    #[test]
+    fn resolves_terminal_size_from_fallback() {
+        let size = resolve_terminal_size(None, None, TerminalSize { width: 80, height: 24 });
+
+        assert_eq!(size, TerminalSize { width: 80, height: 24 });
     }
 }
