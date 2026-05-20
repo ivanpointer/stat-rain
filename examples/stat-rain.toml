@@ -1,7 +1,7 @@
 # Generated starter config for stat-rain.
 
 [profiles.default.map]
-speed = "cpu.normalized * 4 + 0.35"
+speed = "cpu.normalized * 4 + 0.25"
 density = "memory.normalized * 0.18 + 0.72"
 color_hotness = "cpu.normalized"
 brightness = "memory.normalized * 0.4 + 0.5"
@@ -14,7 +14,7 @@ ember_color_hotness = "0"
 ember_fade_length = "80"
 
 [profiles.thermal.map]
-speed = "cpu.normalized * 4 + 0.35"
+speed = "cpu.normalized * 4 + 0.25"
 density = "memory.normalized * 0.18 + 0.72"
 color_hotness = "thermal_zone.raw / 100"
 brightness = "cpu.normalized * 0.3 + 0.6"

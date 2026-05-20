@@ -16,7 +16,7 @@ impl Default for AppConfig {
         let mut mappings = BTreeMap::new();
         mappings.insert(
             VisualAttribute::Speed,
-            MappingExpression::new("cpu.normalized * 4 + 0.35").unwrap(),
+            MappingExpression::new("cpu.normalized * 4 + 0.25").unwrap(),
         );
         mappings.insert(
             VisualAttribute::Density,
@@ -228,7 +228,7 @@ mod tests {
 
         let state = config.evaluate_effect_state(&metrics).unwrap();
 
-        assert_eq!(state.speed, 0.35);
+        assert_eq!(state.speed, 0.25);
     }
 
     #[test]
