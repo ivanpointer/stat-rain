@@ -1,4 +1,6 @@
 use crate::mapping::{MappingExpression, VisualAttribute};
+use crate::effect::EffectState;
+use crate::metrics::MetricRegistry;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -74,6 +76,25 @@ impl AppConfig {
         self.set_mapping(attribute.trim(), expression.trim())
     }
 
+    pub fn evaluate_effect_state(&self, metrics: &MetricRegistry) -> Result<EffectState> {
+        let mut state = EffectState::default();
+
+        for (attribute, expression) in &self.mappings {
+            let value = expression.evaluate(metrics)?;
+            match attribute {
+                VisualAttribute::Speed => state.speed = value,
+                VisualAttribute::Density => state.density = value,
+                VisualAttribute::ColorHotness => state.color_hotness = value,
+                VisualAttribute::Brightness => state.brightness = value,
+                VisualAttribute::FadeLength => state.fade_length = value,
+                VisualAttribute::GlyphChurn => state.glyph_churn = value,
+                VisualAttribute::MessageRevealIntensity => state.message_reveal_intensity = value,
+            }
+        }
+
+        Ok(state)
+    }
+
     fn set_mapping(&mut self, attribute: &str, expression: &str) -> Result<()> {
         let attribute = attribute
             .parse::<VisualAttribute>()
@@ -87,6 +108,7 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::{MetricRegistry, MetricValue};
 
     #[test]
     fn loads_selected_profile_mapping() {
@@ -135,5 +157,28 @@ mod tests {
                 .as_str(),
             "cpu.normalized * 4"
         );
+    }
+
+    #[test]
+    fn converts_mappings_to_effect_state() {
+        let config = AppConfig::from_toml_profile(
+            r#"
+            [profiles.default.map]
+            speed = "cpu.normalized * 8 + 1"
+            color_hotness = "thermal_zone.raw / 100"
+            brightness = "0.75"
+            "#,
+            "default",
+        )
+        .unwrap();
+        let mut metrics = MetricRegistry::default();
+        metrics.set("cpu", MetricValue::new(None, Some(0.5)));
+        metrics.set("thermal_zone", MetricValue::new(Some(70.0), None));
+
+        let state = config.evaluate_effect_state(&metrics).unwrap();
+
+        assert_eq!(state.speed, 5.0);
+        assert_eq!(state.color_hotness, 0.7);
+        assert_eq!(state.brightness, 0.75);
     }
 }
