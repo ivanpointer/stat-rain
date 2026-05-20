@@ -200,6 +200,10 @@ fn write_color(mut output: impl Write, cell: &RenderCell, color_mode: ColorMode)
         ColorMode::Ansi256 => {
             let color = if cell.message_color_bucket > 0 {
                 ansi256_message_color(cell.message_color_bucket)
+            } else if cell.health_degraded && cell.error_tint_bucket > 0 {
+                196
+            } else if cell.health_degraded {
+                244
             } else if cell.color_hotness_bucket > 170 {
                 196
             } else if cell.color_hotness_bucket > 84 {
@@ -212,6 +216,10 @@ fn write_color(mut output: impl Write, cell: &RenderCell, color_mode: ColorMode)
         ColorMode::Ansi16 => {
             let color = if cell.message_color_bucket > 0 {
                 ansi16_message_color(cell.message_color_bucket)
+            } else if cell.health_degraded && cell.error_tint_bucket > 0 {
+                31
+            } else if cell.health_degraded {
+                37
             } else if cell.color_hotness_bucket > 170 {
                 31
             } else if cell.color_hotness_bucket > 84 {
@@ -245,6 +253,10 @@ fn ansi16_message_color(color_bucket: u8) -> u8 {
 }
 
 fn truecolor_rgb(cell: &RenderCell) -> (u8, u8, u8) {
+    if cell.health_degraded && cell.message_color_bucket == 0 {
+        return degraded_rgb(cell);
+    }
+
     if cell.head_brightness_bucket > 0 {
         let head = cell.head_brightness_bucket;
         if cell.message_color_bucket > 0 {
@@ -266,6 +278,17 @@ fn truecolor_rgb(cell: &RenderCell) -> (u8, u8, u8) {
     let hot = cell.color_hotness_bucket;
     let red = scale_channel(hot, 180);
     let blue = green / 10;
+    (red, green, blue)
+}
+
+fn degraded_rgb(cell: &RenderCell) -> (u8, u8, u8) {
+    let base = cell
+        .head_brightness_bucket
+        .max(cell.ember_brightness_bucket)
+        .max(cell.brightness_bucket);
+    let red = base.saturating_add(cell.error_tint_bucket);
+    let green = base.saturating_sub(cell.error_tint_bucket / 3);
+    let blue = base.saturating_sub(cell.error_tint_bucket / 3);
     (red, green, blue)
 }
 
@@ -361,6 +384,8 @@ mod tests {
                     head_brightness_bucket: 0,
                     ember_brightness_bucket: 0,
                     ember_color_hotness_bucket: 0,
+                    health_degraded: false,
+                    error_tint_bucket: 0,
                 },
                 RenderCell {
                     glyph: '1',
@@ -370,6 +395,8 @@ mod tests {
                     head_brightness_bucket: 0,
                     ember_brightness_bucket: 0,
                     ember_color_hotness_bucket: 0,
+                    health_degraded: false,
+                    error_tint_bucket: 0,
                 },
             ],
         };
@@ -398,6 +425,8 @@ mod tests {
                     head_brightness_bucket: 0,
                     ember_brightness_bucket: 0,
                     ember_color_hotness_bucket: 0,
+                    health_degraded: false,
+                    error_tint_bucket: 0,
                 },
                 RenderCell {
                     glyph: '1',
@@ -407,6 +436,8 @@ mod tests {
                     head_brightness_bucket: 0,
                     ember_brightness_bucket: 0,
                     ember_color_hotness_bucket: 0,
+                    health_degraded: false,
+                    error_tint_bucket: 0,
                 },
             ],
         };
@@ -433,6 +464,8 @@ mod tests {
                 head_brightness_bucket: 255,
                 ember_brightness_bucket: 0,
                 ember_color_hotness_bucket: 0,
+                health_degraded: false,
+                error_tint_bucket: 0,
             }],
         };
         let mut output = Vec::new();
@@ -457,6 +490,8 @@ mod tests {
                 head_brightness_bucket: 255,
                 ember_brightness_bucket: 0,
                 ember_color_hotness_bucket: 0,
+                health_degraded: false,
+                error_tint_bucket: 0,
             }],
         };
         let mut output = Vec::new();
@@ -517,6 +552,8 @@ mod tests {
                 head_brightness_bucket: 0,
                 ember_brightness_bucket: 0,
                 ember_color_hotness_bucket: 0,
+                health_degraded: false,
+                error_tint_bucket: 0,
             }],
         };
         let mut output = Vec::new();
@@ -526,6 +563,58 @@ mod tests {
         assert!(String::from_utf8(output)
             .unwrap()
             .contains("\x1b[38;2;0;180;18m"));
+    }
+
+    #[test]
+    fn truecolor_renders_degraded_trail_as_greyscale() {
+        let frame = Frame {
+            width: 1,
+            height: 1,
+            cells: vec![RenderCell {
+                glyph: '0',
+                color_hotness_bucket: 0,
+                message_color_bucket: 0,
+                brightness_bucket: 180,
+                head_brightness_bucket: 0,
+                ember_brightness_bucket: 0,
+                ember_color_hotness_bucket: 0,
+                health_degraded: true,
+                error_tint_bucket: 0,
+            }],
+        };
+        let mut output = Vec::new();
+
+        write_frame(&mut output, &frame, ColorMode::TrueColor).unwrap();
+
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("\x1b[38;2;180;180;180m"));
+    }
+
+    #[test]
+    fn truecolor_renders_degraded_error_trail_with_red_tint() {
+        let frame = Frame {
+            width: 1,
+            height: 1,
+            cells: vec![RenderCell {
+                glyph: '0',
+                color_hotness_bucket: 0,
+                message_color_bucket: 0,
+                brightness_bucket: 120,
+                head_brightness_bucket: 0,
+                ember_brightness_bucket: 0,
+                ember_color_hotness_bucket: 0,
+                health_degraded: true,
+                error_tint_bucket: 60,
+            }],
+        };
+        let mut output = Vec::new();
+
+        write_frame(&mut output, &frame, ColorMode::TrueColor).unwrap();
+
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("\x1b[38;2;180;100;100m"));
     }
 
     #[test]
@@ -541,6 +630,8 @@ mod tests {
                 head_brightness_bucket: 0,
                 ember_brightness_bucket: 148,
                 ember_color_hotness_bucket: 0,
+                health_degraded: false,
+                error_tint_bucket: 0,
             }],
         };
         let mut output = Vec::new();
@@ -565,6 +656,8 @@ mod tests {
                 head_brightness_bucket: 0,
                 ember_brightness_bucket: 148,
                 ember_color_hotness_bucket: 255,
+                health_degraded: false,
+                error_tint_bucket: 0,
             }],
         };
         let mut output = Vec::new();
@@ -620,6 +713,8 @@ mod tests {
                 head_brightness_bucket: 255,
                 ember_brightness_bucket: 0,
                 ember_color_hotness_bucket: 0,
+                health_degraded: false,
+                error_tint_bucket: 0,
             }],
         };
         let mut output = Vec::new();

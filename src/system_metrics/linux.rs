@@ -23,7 +23,7 @@ impl LinuxSystemProvider {
         if let Some(previous_cpu) = self.previous_cpu {
             if let Some(normalized) = normalized_cpu_usage(previous_cpu, current_cpu) {
                 let value = MetricValue::new(Some(normalized * 100.0), Some(normalized));
-                sample.set("cpu", value);
+                sample.set("cpu", value.clone());
                 sample.set("cpu.total", value);
             }
         }

@@ -48,9 +48,9 @@ rain pane:
 
 ```sh
 cargo run -- run --socket /tmp/stat-rain.sock \
-  --message-fade-in-frames 45 \
-  --message-stay-frames 90 \
-  --message-fade-out-frames 90
+  --message-fade-in-ms 1500 \
+  --message-stay-ms 3000 \
+  --message-wash-ms 3000
 ```
 
 In another pane:
@@ -59,8 +59,11 @@ In another pane:
 cargo run -- send --socket /tmp/stat-rain.sock --metric cpu --value 0.02
 cargo run -- send --socket /tmp/stat-rain.sock --metric cpu --value 0.99
 cargo run -- send --socket /tmp/stat-rain.sock --metric cpu --value 0.50
-cargo run -- send --socket /tmp/stat-rain.sock --message "BUILD OK"
+cargo run -- send --socket /tmp/stat-rain.sock --message "BUILD OK" --ttl-ms 10000
 cargo run -- send --socket /tmp/stat-rain.sock --message "BUILD FAILED" --class error
+cargo run -- send --socket /tmp/stat-rain.sock --metric thermal_zone --stale --reason "sensor timeout"
+cargo run -- send --socket /tmp/stat-rain.sock --metric thermal_zone --error --reason "read failed"
+cargo run -- send --socket /tmp/stat-rain.sock --metric thermal_zone --clear-status
 ```
 
 The pushed `cpu` metric also updates `cpu.total`, and external values stay
@@ -70,7 +73,14 @@ resolve in randomized order during fade-in, hold stable, then wash away as rain
 and embers overwrite the message cells. Message classes render with explicit
 status colors: `info` is blue, `success` is green, `warning` is yellow, and
 `error` is red. Class changes also tune brightness while preserving the same
-message lifecycle.
+message lifecycle. `--ttl-ms` controls how long a message stays fully visible
+before wash-away begins.
+
+Mapped metric stale/error states degrade the rain field only when the metric is
+used by the active visual mappings. Stale and error both shift rain/embers
+toward greyscale; error also adds a subtle red pulse. The derived health text is
+persistent while the mapped health condition remains active, but user-sent
+messages can temporarily occupy the center before the health text returns.
 
 The Make helpers accept the same classes:
 
@@ -79,6 +89,9 @@ make send-message MSG="DEPLOY STARTED" CLASS=info
 make send-success MSG="BUILD OK"
 make send-warning MSG="CPU HOT"
 make send-error MSG="BUILD FAILED"
+make send-stale METRIC=thermal_zone REASON="sensor timeout"
+make send-metric-error METRIC=thermal_zone REASON="read failed"
+make clear-status METRIC=thermal_zone
 ```
 
 `devbox` provides the project toolchain when available:

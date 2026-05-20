@@ -3,7 +3,7 @@ use crate::mapping::{MappingExpression, VisualAttribute};
 use crate::metrics::MetricRegistry;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppConfig {
@@ -97,6 +97,14 @@ impl AppConfig {
         }
 
         Ok(state)
+    }
+
+    pub fn referenced_metrics(&self) -> Result<BTreeSet<String>> {
+        let mut references = BTreeSet::new();
+        for expression in self.mappings.values() {
+            references.extend(expression.referenced_metrics()?);
+        }
+        Ok(references)
     }
 
     fn set_mapping(&mut self, attribute: &str, expression: &str) -> Result<()> {
@@ -232,5 +240,30 @@ mod tests {
         let state = config.evaluate_effect_state(&metrics).unwrap();
 
         assert_eq!(state.density, 0.72);
+    }
+
+    #[test]
+    fn reports_referenced_metrics_from_active_mappings() {
+        let config = AppConfig::from_toml_profile(
+            r#"
+            [profiles.default.map]
+            speed = "cpu.normalized * 8 + 1"
+            color_hotness = "thermal_zone.raw / 100"
+            brightness = "memory.normalized"
+            "#,
+            "default",
+        )
+        .unwrap();
+
+        let references = config.referenced_metrics().unwrap();
+
+        assert_eq!(
+            references,
+            BTreeSet::from([
+                "cpu".to_string(),
+                "memory".to_string(),
+                "thermal_zone".to_string()
+            ])
+        );
     }
 }

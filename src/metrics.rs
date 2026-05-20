@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MetricValue {
     pub raw: Option<f64>,
     pub normalized: Option<f64>,
     pub stale: bool,
+    pub status: MetricStatus,
 }
 
 impl MetricValue {
@@ -13,8 +14,16 @@ impl MetricValue {
             raw,
             normalized,
             stale: false,
+            status: MetricStatus::Normal,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetricStatus {
+    Normal,
+    Stale { reason: Option<String> },
+    Error { reason: Option<String> },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -27,15 +36,36 @@ impl MetricRegistry {
         self.values.insert(name.into(), value);
     }
 
-    pub fn mark_stale(&mut self, name: impl Into<String>) {
+    pub fn mark_stale(&mut self, name: impl Into<String>, reason: Option<String>) {
         self.values.insert(
             name.into(),
             MetricValue {
                 raw: None,
                 normalized: Some(1.0),
                 stale: true,
+                status: MetricStatus::Stale { reason },
             },
         );
+    }
+
+    pub fn mark_error(&mut self, name: impl Into<String>, reason: Option<String>) {
+        self.values.insert(
+            name.into(),
+            MetricValue {
+                raw: None,
+                normalized: Some(1.0),
+                stale: true,
+                status: MetricStatus::Error { reason },
+            },
+        );
+    }
+
+    pub fn clear_status(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        if let Some(value) = self.values.get_mut(&name) {
+            value.stale = false;
+            value.status = MetricStatus::Normal;
+        }
     }
 
     pub fn apply_sample(&mut self, sample: MetricSample) {
@@ -45,7 +75,7 @@ impl MetricRegistry {
     }
 
     pub fn get(&self, name: &str) -> Option<MetricValue> {
-        self.values.get(name).copied()
+        self.values.get(name).cloned()
     }
 
     pub fn len(&self) -> usize {
@@ -68,7 +98,7 @@ impl MetricSample {
     }
 
     pub fn get(&self, name: &str) -> Option<MetricValue> {
-        self.values.get(name).copied()
+        self.values.get(name).cloned()
     }
 }
 
@@ -152,10 +182,57 @@ mod tests {
     fn marks_metric_stale() {
         let mut registry = MetricRegistry::default();
 
-        registry.mark_stale("cpu");
+        registry.mark_stale("cpu", Some("timeout".to_string()));
 
         let value = registry.get("cpu").unwrap();
         assert!(value.stale);
         assert_eq!(value.normalized, Some(1.0));
+        assert_eq!(
+            value.status,
+            MetricStatus::Stale {
+                reason: Some("timeout".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn marks_metric_error() {
+        let mut registry = MetricRegistry::default();
+
+        registry.mark_error("cpu", Some("read failed".to_string()));
+
+        let value = registry.get("cpu").unwrap();
+        assert!(value.stale);
+        assert_eq!(
+            value.status,
+            MetricStatus::Error {
+                reason: Some("read failed".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn normal_update_clears_metric_status() {
+        let mut registry = MetricRegistry::default();
+        registry.mark_error("cpu", None);
+
+        registry.set("cpu", MetricValue::new(Some(42.0), Some(0.42)));
+
+        let value = registry.get("cpu").unwrap();
+        assert!(!value.stale);
+        assert_eq!(value.status, MetricStatus::Normal);
+    }
+
+    #[test]
+    fn clears_metric_status_without_replacing_value() {
+        let mut registry = MetricRegistry::default();
+        registry.set("cpu", MetricValue::new(Some(42.0), Some(0.42)));
+        registry.mark_stale("cpu", None);
+
+        registry.clear_status("cpu");
+
+        let value = registry.get("cpu").unwrap();
+        assert!(!value.stale);
+        assert_eq!(value.status, MetricStatus::Normal);
     }
 }

@@ -5,10 +5,12 @@ use stat_rain::dev_tools;
 use stat_rain::effect::{
     apply_message_overlay, EffectSmoother, GlyphSet, MessageOverlay, MessageTiming,
 };
-use stat_rain::metrics::{MetricProvider, MetricRegistry, MetricValue};
+use stat_rain::health::HealthState;
+use stat_rain::metrics::{MetricProvider, MetricRegistry, MetricStatus, MetricValue};
 use stat_rain::protocol::{self, ProtocolMessage};
 use stat_rain::system_metrics::BuiltinSystemProvider;
 use stat_rain::terminal::{self, FrameRenderer, TerminalCapabilities, TerminalSize};
+use stat_rain::text::{frames_from_ms, MessageQueue, QueuedMessage};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
@@ -42,25 +44,55 @@ struct ExternalMetricOverrides {
 
 impl ExternalMetricOverrides {
     fn set(&mut self, name: String, value: MetricValue) {
-        self.metrics.insert(name.clone(), value);
+        self.metrics.insert(name.clone(), value.clone());
         if name == "cpu" {
             self.metrics.insert("cpu.total".to_string(), value);
         }
     }
 
-    fn mark_stale(&mut self, name: String) {
+    fn mark_stale(&mut self, name: String, reason: Option<String>) {
         let value = MetricValue {
             raw: None,
             normalized: Some(1.0),
             stale: true,
+            status: MetricStatus::Stale { reason },
         };
         self.set(name, value);
     }
 
+    fn mark_error(&mut self, name: String, reason: Option<String>) {
+        let value = MetricValue {
+            raw: None,
+            normalized: Some(1.0),
+            stale: true,
+            status: MetricStatus::Error { reason },
+        };
+        self.set(name, value);
+    }
+
+    fn clear_status(&mut self, name: String) {
+        clear_override_status(&mut self.metrics, &name);
+        if name == "cpu" {
+            clear_override_status(&mut self.metrics, "cpu.total");
+        }
+    }
+
     fn apply_to(&self, metrics: &mut MetricRegistry) {
         for (name, value) in &self.metrics {
-            metrics.set(name.clone(), *value);
+            metrics.set(name.clone(), value.clone());
         }
+    }
+}
+
+fn clear_override_status(metrics: &mut BTreeMap<String, MetricValue>, name: &str) {
+    let remove = metrics.get(name).is_some_and(|value| {
+        value.raw.is_none() && value.normalized == Some(1.0) && value.status != MetricStatus::Normal
+    });
+    if remove {
+        metrics.remove(name);
+    } else if let Some(value) = metrics.get_mut(name) {
+        value.stale = false;
+        value.status = MetricStatus::Normal;
     }
 }
 
@@ -70,11 +102,14 @@ fn run(args: RunArgs) -> Result<()> {
 
 pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
     let config = load_config(&args)?;
+    let mapped_metrics = config.referenced_metrics()?;
     let simulated_metrics = dev_tools::parse_simulated_metrics(&args.simulated_metrics)?;
     let message_timing = message_timing_from_args(&args);
     let mut metrics = initial_metric_registry();
     let mut external_overrides = ExternalMetricOverrides::default();
+    let mut message_queue = MessageQueue::default();
     let mut active_message: Option<MessageOverlay> = None;
+    let mut health_message: Option<MessageOverlay> = None;
     let mut provider = BuiltinSystemProvider::new();
     sample_builtin_metrics(&mut provider, &mut metrics);
     dev_tools::apply_simulated_metrics(&mut metrics, &simulated_metrics);
@@ -109,6 +144,7 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
             &socket_input,
             &mut metrics,
             &mut external_overrides,
+            &mut message_queue,
             &mut active_message,
             message_timing,
         );
@@ -133,13 +169,27 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
             renderer.clear();
             terminal::write_clear(&mut *output)?;
         }
-        let mut frame = engine.step(state);
+        let health = HealthState::from_mapped_metrics(&metrics, &mapped_metrics);
+        let mut frame = engine.step_with_health(state, &health);
+        if active_message.is_none() {
+            if let Some(queued) = message_queue.pop_next() {
+                active_message = Some(message_overlay_from_queued(queued, message_timing));
+            }
+        }
         if let Some(message) = active_message.as_mut() {
             apply_message_overlay(&mut frame, message, state.message_reveal_intensity);
             message.advance();
             if message.is_expired() {
                 active_message = None;
             }
+        } else {
+            apply_health_message(
+                &mut frame,
+                &mut health_message,
+                &health,
+                message_timing,
+                state.message_reveal_intensity,
+            );
         }
         renderer.write_frame(&mut *output, &frame)?;
         if !delay.is_zero() {
@@ -150,6 +200,39 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
     interrupted.store(true, Ordering::Relaxed);
 
     Ok(())
+}
+
+fn apply_health_message(
+    frame: &mut stat_rain::effect::Frame,
+    health_message: &mut Option<MessageOverlay>,
+    health: &HealthState,
+    timing: MessageTiming,
+    intensity: f64,
+) {
+    let Some(text) = health.message_text() else {
+        *health_message = None;
+        return;
+    };
+
+    let reset = health_message
+        .as_ref()
+        .map_or(true, |message| message.text != text);
+    if reset {
+        let mut overlay = MessageOverlay::new(text, timing.fade_in, u64::MAX / 4, 0, 0x4845_414c);
+        overlay.class = if health.has_error() {
+            stat_rain::message::MessageClass::Error
+        } else {
+            stat_rain::message::MessageClass::Warning
+        };
+        *health_message = Some(overlay);
+    }
+
+    if let Some(message) = health_message.as_mut() {
+        apply_message_overlay(frame, message, intensity);
+        if message.age < message.fade_in + 1 {
+            message.advance();
+        }
+    }
 }
 
 fn send(args: SendArgs) -> Result<()> {
@@ -209,6 +292,7 @@ fn drain_socket_messages(
     socket_input: &Option<SocketInput>,
     metrics: &mut MetricRegistry,
     overrides: &mut ExternalMetricOverrides,
+    message_queue: &mut MessageQueue,
     active_message: &mut Option<MessageOverlay>,
     message_timing: MessageTiming,
 ) {
@@ -216,13 +300,22 @@ fn drain_socket_messages(
         return;
     };
     while let Ok(message) = socket_input.receiver.try_recv() {
-        apply_protocol_message(metrics, overrides, active_message, message_timing, message);
+        apply_protocol_message(
+            metrics,
+            overrides,
+            message_queue,
+            active_message,
+            message_timing,
+            message,
+        );
     }
 }
 
 fn message_from_send_args(args: &SendArgs) -> Result<ProtocolMessage> {
     match (&args.metric, args.value, &args.message) {
-        (Some(name), Some(value), None) => {
+        (Some(name), Some(value), None)
+            if !args.stale && !args.error && !args.clear_status && args.reason.is_none() =>
+        {
             if !(0.0..=1.0).contains(&value) || !value.is_finite() {
                 bail!("--value must be a finite normalized value between 0.0 and 1.0");
             }
@@ -232,9 +325,25 @@ fn message_from_send_args(args: &SendArgs) -> Result<ProtocolMessage> {
                 normalized: Some(value),
             })
         }
+        (Some(name), None, None) if args.stale && !args.error && !args.clear_status => {
+            Ok(ProtocolMessage::MetricStale {
+                name: name.clone(),
+                reason: args.reason.clone(),
+            })
+        }
+        (Some(name), None, None) if args.error && !args.stale && !args.clear_status => {
+            Ok(ProtocolMessage::MetricError {
+                name: name.clone(),
+                reason: args.reason.clone(),
+            })
+        }
+        (Some(name), None, None) if args.clear_status && !args.stale && !args.error => {
+            Ok(ProtocolMessage::MetricStatusClear { name: name.clone() })
+        }
         (None, None, Some(text)) => Ok(ProtocolMessage::TextInjection {
             text: text.clone(),
             class: args.class,
+            ttl_ms: args.ttl_ms,
         }),
         (Some(_), None, None) => bail!("--metric requires --value"),
         _ => bail!("provide either --metric with --value, or --message"),
@@ -244,6 +353,7 @@ fn message_from_send_args(args: &SendArgs) -> Result<ProtocolMessage> {
 fn apply_protocol_message(
     metrics: &mut MetricRegistry,
     overrides: &mut ExternalMetricOverrides,
+    message_queue: &mut MessageQueue,
     active_message: &mut Option<MessageOverlay>,
     message_timing: MessageTiming,
     message: ProtocolMessage,
@@ -258,30 +368,57 @@ fn apply_protocol_message(
             overrides.set(name, value);
             overrides.apply_to(metrics);
         }
-        ProtocolMessage::MetricStale { name } => {
-            overrides.mark_stale(name);
+        ProtocolMessage::MetricStale { name, reason } => {
+            overrides.mark_stale(name, reason);
             overrides.apply_to(metrics);
         }
-        ProtocolMessage::TextInjection { text, class } => {
-            let mut overlay = MessageOverlay::new(
-                text,
-                message_timing.fade_in,
-                message_timing.stay,
-                message_timing.fade_out,
-                0x5445_5854,
+        ProtocolMessage::MetricError { name, reason } => {
+            overrides.mark_error(name, reason);
+            overrides.apply_to(metrics);
+        }
+        ProtocolMessage::MetricStatusClear { name } => {
+            metrics.clear_status(name.clone());
+            if name == "cpu" {
+                metrics.clear_status("cpu.total");
+            }
+            overrides.clear_status(name);
+            overrides.apply_to(metrics);
+        }
+        ProtocolMessage::TextInjection {
+            text,
+            class,
+            ttl_ms,
+        } => {
+            let ttl_frames =
+                ttl_ms.map(|ttl_ms| frames_from_ms(ttl_ms, message_timing.frame_delay));
+            message_queue.enqueue_or_refresh(
+                active_message,
+                QueuedMessage::new(text, class, ttl_frames),
+                message_timing,
             );
-            overlay.class = class;
-            *active_message = Some(overlay);
         }
     }
 }
 
 fn message_timing_from_args(args: &RunArgs) -> MessageTiming {
     MessageTiming {
-        fade_in: args.message_fade_in_frames,
-        stay: args.message_stay_frames,
-        fade_out: args.message_fade_out_frames,
+        fade_in: frames_from_ms(args.message_fade_in_ms, args.frame_delay_ms),
+        stay: frames_from_ms(args.message_stay_ms, args.frame_delay_ms),
+        fade_out: frames_from_ms(args.message_wash_ms, args.frame_delay_ms),
+        frame_delay: args.frame_delay_ms,
     }
+}
+
+fn message_overlay_from_queued(message: QueuedMessage, timing: MessageTiming) -> MessageOverlay {
+    let mut overlay = MessageOverlay::new(
+        message.text,
+        timing.fade_in,
+        message.ttl_frames.unwrap_or(timing.stay),
+        timing.fade_out,
+        0x5445_5854,
+    );
+    overlay.class = message.class;
+    overlay
 }
 
 fn stress_cpu(args: StressCpuArgs) -> Result<()> {
@@ -358,8 +495,13 @@ mod tests {
             socket: "/tmp/stat-rain.sock".into(),
             metric: Some("cpu".to_string()),
             value: Some(0.99),
+            stale: false,
+            error: false,
+            reason: None,
+            clear_status: false,
             message: None,
             class: MessageClass::Info,
+            ttl_ms: None,
         };
 
         assert_eq!(
@@ -378,8 +520,13 @@ mod tests {
             socket: "/tmp/stat-rain.sock".into(),
             metric: None,
             value: None,
+            stale: false,
+            error: false,
+            reason: None,
+            clear_status: false,
             message: Some("BUILD OK".to_string()),
             class: MessageClass::Info,
+            ttl_ms: Some(10_000),
         };
 
         assert_eq!(
@@ -387,6 +534,7 @@ mod tests {
             stat_rain::protocol::ProtocolMessage::TextInjection {
                 text: "BUILD OK".to_string(),
                 class: MessageClass::Info,
+                ttl_ms: Some(10_000),
             }
         );
     }
@@ -397,8 +545,13 @@ mod tests {
             socket: "/tmp/stat-rain.sock".into(),
             metric: None,
             value: None,
+            stale: false,
+            error: false,
+            reason: None,
+            clear_status: false,
             message: Some("BUILD FAILED".to_string()),
             class: MessageClass::Error,
+            ttl_ms: None,
         };
 
         assert_eq!(
@@ -406,6 +559,78 @@ mod tests {
             stat_rain::protocol::ProtocolMessage::TextInjection {
                 text: "BUILD FAILED".to_string(),
                 class: MessageClass::Error,
+                ttl_ms: None,
+            }
+        );
+    }
+
+    #[test]
+    fn send_stale_args_create_metric_stale_message() {
+        let args = stat_rain::cli::SendArgs {
+            socket: "/tmp/stat-rain.sock".into(),
+            metric: Some("thermal_zone".to_string()),
+            value: None,
+            stale: true,
+            error: false,
+            reason: Some("sensor timeout".to_string()),
+            clear_status: false,
+            message: None,
+            class: MessageClass::Info,
+            ttl_ms: None,
+        };
+
+        assert_eq!(
+            message_from_send_args(&args).unwrap(),
+            stat_rain::protocol::ProtocolMessage::MetricStale {
+                name: "thermal_zone".to_string(),
+                reason: Some("sensor timeout".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn send_error_args_create_metric_error_message() {
+        let args = stat_rain::cli::SendArgs {
+            socket: "/tmp/stat-rain.sock".into(),
+            metric: Some("thermal_zone".to_string()),
+            value: None,
+            stale: false,
+            error: true,
+            reason: Some("read failed".to_string()),
+            clear_status: false,
+            message: None,
+            class: MessageClass::Info,
+            ttl_ms: None,
+        };
+
+        assert_eq!(
+            message_from_send_args(&args).unwrap(),
+            stat_rain::protocol::ProtocolMessage::MetricError {
+                name: "thermal_zone".to_string(),
+                reason: Some("read failed".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn send_clear_status_args_create_metric_clear_message() {
+        let args = stat_rain::cli::SendArgs {
+            socket: "/tmp/stat-rain.sock".into(),
+            metric: Some("thermal_zone".to_string()),
+            value: None,
+            stale: false,
+            error: false,
+            reason: None,
+            clear_status: true,
+            message: None,
+            class: MessageClass::Info,
+            ttl_ms: None,
+        };
+
+        assert_eq!(
+            message_from_send_args(&args).unwrap(),
+            stat_rain::protocol::ProtocolMessage::MetricStatusClear {
+                name: "thermal_zone".to_string()
             }
         );
     }
@@ -424,11 +649,13 @@ mod tests {
             fade_in: 1,
             stay: 1,
             fade_out: 1,
+            frame_delay: 33,
         };
 
         apply_protocol_message(
             &mut metrics,
             &mut overrides,
+            &mut MessageQueue::default(),
             &mut active_message,
             timing,
             message,
@@ -449,27 +676,101 @@ mod tests {
         let message = stat_rain::protocol::ProtocolMessage::TextInjection {
             text: "BUILD OK".to_string(),
             class: MessageClass::Warning,
+            ttl_ms: None,
         };
         let timing = MessageTiming {
             fade_in: 12,
             stay: 34,
             fade_out: 56,
+            frame_delay: 33,
         };
+        let mut queue = MessageQueue::default();
 
         apply_protocol_message(
             &mut metrics,
             &mut overrides,
+            &mut queue,
             &mut active_message,
             timing,
             message,
         );
 
-        let active_message = active_message.unwrap();
+        let active_message = message_overlay_from_queued(queue.pop_next().unwrap(), timing);
         assert_eq!(active_message.text, "BUILD OK");
         assert_eq!(active_message.class, MessageClass::Warning);
         assert_eq!(active_message.fade_in, 12);
         assert_eq!(active_message.stay, 34);
         assert_eq!(active_message.fade_out, 56);
+    }
+
+    #[test]
+    fn message_timing_uses_milliseconds_from_run_args() {
+        let args = stat_rain::cli::RunArgs {
+            config: None,
+            profile: None,
+            config_inline: None,
+            mappings: Vec::new(),
+            simulated_metrics: Vec::new(),
+            socket: None,
+            frames: None,
+            frame_delay_ms: 33,
+            metric_sample_ms: 1_000,
+            effect_smoothing_ms: 10_000,
+            message_fade_in_ms: 100,
+            message_stay_ms: 300,
+            message_wash_ms: 500,
+            width: None,
+            height: None,
+            no_alt_screen: false,
+            ascii: false,
+        };
+
+        let timing = message_timing_from_args(&args);
+
+        assert_eq!(timing.fade_in, 4);
+        assert_eq!(timing.stay, 10);
+        assert_eq!(timing.fade_out, 16);
+        assert_eq!(timing.frame_delay, 33);
+    }
+
+    #[test]
+    fn health_message_persists_and_uses_error_class() {
+        let mut frame = stat_rain::effect::Frame {
+            width: 24,
+            height: 5,
+            cells: vec![
+                stat_rain::effect::RenderCell {
+                    glyph: ' ',
+                    color_hotness_bucket: 0,
+                    message_color_bucket: 0,
+                    brightness_bucket: 0,
+                    head_brightness_bucket: 0,
+                    ember_brightness_bucket: 0,
+                    ember_color_hotness_bucket: 0,
+                    health_degraded: false,
+                    error_tint_bucket: 0,
+                };
+                120
+            ],
+        };
+        let mut health_message = None;
+        let health = HealthState {
+            stale_metrics: vec!["cpu".to_string()],
+            error_metrics: vec!["thermal_zone".to_string()],
+        };
+        let timing = MessageTiming {
+            fade_in: 0,
+            stay: 1,
+            fade_out: 1,
+            frame_delay: 33,
+        };
+
+        apply_health_message(&mut frame, &mut health_message, &health, timing, 0.0);
+
+        let message = health_message.unwrap();
+        assert_eq!(message.text, "ERROR: thermal_zone  STALE: cpu");
+        assert_eq!(message.class, MessageClass::Error);
+        assert!(!message.is_expired());
     }
 }
 
@@ -477,9 +778,9 @@ fn sample_builtin_metrics(provider: &mut impl MetricProvider, metrics: &mut Metr
     match provider.sample() {
         Ok(sample) => metrics.apply_sample(sample),
         Err(_) => {
-            metrics.mark_stale("cpu");
-            metrics.mark_stale("cpu.total");
-            metrics.mark_stale("memory");
+            metrics.mark_stale("cpu", None);
+            metrics.mark_stale("cpu.total", None);
+            metrics.mark_stale("memory", None);
         }
     }
 }

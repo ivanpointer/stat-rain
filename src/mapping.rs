@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
@@ -39,6 +40,10 @@ impl MappingExpression {
     pub fn evaluate(&self, metrics: &MetricRegistry) -> Result<f64, MappingError> {
         Parser::new(&self.0, metrics).parse()
     }
+
+    pub fn referenced_metrics(&self) -> Result<BTreeSet<String>, MappingError> {
+        ReferenceParser::new(&self.0).parse()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +52,68 @@ pub enum MappingError {
     ExpectedNumberOrMetric,
     UnexpectedToken(String),
     UnknownMetricField(String),
+}
+
+struct ReferenceParser<'a> {
+    input: &'a str,
+    offset: usize,
+    metrics: BTreeSet<String>,
+}
+
+impl<'a> ReferenceParser<'a> {
+    fn new(input: &'a str) -> Self {
+        Self {
+            input,
+            offset: 0,
+            metrics: BTreeSet::new(),
+        }
+    }
+
+    fn parse(mut self) -> Result<BTreeSet<String>, MappingError> {
+        while self.offset < self.input.len() {
+            self.skip_whitespace();
+            if self
+                .peek()
+                .is_some_and(|value| value.is_ascii_alphabetic() || value == '_')
+            {
+                self.parse_metric_reference()?;
+            } else if let Some(value) = self.peek() {
+                self.offset += value.len_utf8();
+            }
+        }
+        Ok(self.metrics)
+    }
+
+    fn parse_metric_reference(&mut self) -> Result<(), MappingError> {
+        let start = self.offset;
+        while self
+            .peek()
+            .is_some_and(|value| value.is_ascii_alphanumeric() || value == '_' || value == '.')
+        {
+            self.offset += 1;
+        }
+        let field = &self.input[start..self.offset];
+        let Some((metric, value_kind)) = field.rsplit_once('.') else {
+            return Err(MappingError::UnknownMetricField(field.to_string()));
+        };
+        match value_kind {
+            "raw" | "normalized" => {
+                self.metrics.insert(metric.to_string());
+                Ok(())
+            }
+            _ => Err(MappingError::UnknownMetricField(field.to_string())),
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.input[self.offset..].chars().next()
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self.peek().is_some_and(|value| value.is_whitespace()) {
+            self.offset += 1;
+        }
+    }
 }
 
 impl fmt::Display for MappingError {
@@ -243,5 +310,30 @@ mod tests {
         let value = expression.evaluate(&metrics).unwrap();
 
         assert_eq!(value, 0.65);
+    }
+
+    #[test]
+    fn reports_referenced_metric_names() {
+        let expression =
+            MappingExpression::new("cpu.normalized * 4 + thermal_zone.raw / 100").unwrap();
+
+        let references = expression.referenced_metrics().unwrap();
+
+        assert_eq!(
+            references,
+            BTreeSet::from(["cpu".to_string(), "thermal_zone".to_string()])
+        );
+    }
+
+    #[test]
+    fn reports_reference_errors_for_unknown_fields() {
+        let expression = MappingExpression::new("cpu.percent").unwrap();
+
+        let error = expression.referenced_metrics().unwrap_err();
+
+        assert_eq!(
+            error,
+            MappingError::UnknownMetricField("cpu.percent".to_string())
+        );
     }
 }

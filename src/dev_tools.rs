@@ -47,7 +47,7 @@ pub fn parse_simulated_metrics(values: &[String]) -> Result<Vec<SimulatedMetric>
 pub fn apply_simulated_metrics(metrics: &mut MetricRegistry, simulated: &[SimulatedMetric]) {
     for metric in simulated {
         let value = MetricValue::new(metric.raw, metric.normalized);
-        metrics.set(metric.name.clone(), value);
+        metrics.set(metric.name.clone(), value.clone());
         if metric.name == "cpu" {
             metrics.set("cpu.total", value);
         }

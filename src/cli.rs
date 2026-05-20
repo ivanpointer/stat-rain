@@ -50,14 +50,14 @@ pub struct RunArgs {
     #[arg(long = "effect-smoothing-ms", default_value_t = 10_000)]
     pub effect_smoothing_ms: u64,
 
-    #[arg(long = "message-fade-in-frames", default_value_t = 45)]
-    pub message_fade_in_frames: u64,
+    #[arg(long = "message-fade-in-ms", default_value_t = 1_500)]
+    pub message_fade_in_ms: u64,
 
-    #[arg(long = "message-stay-frames", default_value_t = 90)]
-    pub message_stay_frames: u64,
+    #[arg(long = "message-stay-ms", default_value_t = 3_000)]
+    pub message_stay_ms: u64,
 
-    #[arg(long = "message-fade-out-frames", default_value_t = 90)]
-    pub message_fade_out_frames: u64,
+    #[arg(long = "message-wash-ms", default_value_t = 3_000)]
+    pub message_wash_ms: u64,
 
     #[arg(long)]
     pub width: Option<usize>,
@@ -93,10 +93,25 @@ pub struct SendArgs {
     pub value: Option<f64>,
 
     #[arg(long)]
+    pub stale: bool,
+
+    #[arg(long)]
+    pub error: bool,
+
+    #[arg(long)]
+    pub reason: Option<String>,
+
+    #[arg(long = "clear-status")]
+    pub clear_status: bool,
+
+    #[arg(long)]
     pub message: Option<String>,
 
     #[arg(long = "class", default_value_t = MessageClass::Info)]
     pub class: MessageClass,
+
+    #[arg(long = "ttl-ms")]
+    pub ttl_ms: Option<u64>,
 }
 
 #[derive(Debug, Args)]

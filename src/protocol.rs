@@ -13,10 +13,19 @@ pub enum ProtocolMessage {
     },
     MetricStale {
         name: String,
+        reason: Option<String>,
+    },
+    MetricError {
+        name: String,
+        reason: Option<String>,
+    },
+    MetricStatusClear {
+        name: String,
     },
     TextInjection {
         text: String,
         class: MessageClass,
+        ttl_ms: Option<u64>,
     },
 }
 
@@ -34,14 +43,29 @@ impl ProtocolMessage {
                 write_optional_f64(output, *raw);
                 write_optional_f64(output, *normalized);
             }
-            Self::MetricStale { name } => {
+            Self::MetricStale { name, reason } => {
                 output.push(2);
                 write_string(output, name);
+                write_optional_string(output, reason.as_deref());
             }
-            Self::TextInjection { text, class } => {
+            Self::TextInjection {
+                text,
+                class,
+                ttl_ms,
+            } => {
                 output.push(3);
                 write_string(output, text);
                 output.push(class.to_wire());
+                write_optional_u64(output, *ttl_ms);
+            }
+            Self::MetricError { name, reason } => {
+                output.push(4);
+                write_string(output, name);
+                write_optional_string(output, reason.as_deref());
+            }
+            Self::MetricStatusClear { name } => {
+                output.push(5);
+                write_string(output, name);
             }
         }
     }
@@ -61,9 +85,15 @@ impl ProtocolMessage {
                 raw: cursor.read_optional_f64()?,
                 normalized: cursor.read_optional_f64()?,
             }),
-            2 => Ok(Self::MetricStale {
-                name: cursor.read_string()?,
-            }),
+            2 => {
+                let name = cursor.read_string()?;
+                let reason = if cursor.remaining() == 0 {
+                    None
+                } else {
+                    cursor.read_optional_string()?
+                };
+                Ok(Self::MetricStale { name, reason })
+            }
             3 => {
                 let text = cursor.read_string()?;
                 let class = if cursor.remaining() == 0 {
@@ -71,8 +101,25 @@ impl ProtocolMessage {
                 } else {
                     MessageClass::from_wire(cursor.read_u8()?)?
                 };
-                Ok(Self::TextInjection { text, class })
+                let ttl_ms = if cursor.remaining() == 0 {
+                    None
+                } else {
+                    cursor.read_optional_u64()?
+                };
+                Ok(Self::TextInjection {
+                    text,
+                    class,
+                    ttl_ms,
+                })
             }
+            4 => {
+                let name = cursor.read_string()?;
+                let reason = cursor.read_optional_string()?;
+                Ok(Self::MetricError { name, reason })
+            }
+            5 => Ok(Self::MetricStatusClear {
+                name: cursor.read_string()?,
+            }),
             kind => bail!("unsupported protocol message kind: {kind}"),
         }
     }
@@ -112,6 +159,26 @@ fn write_optional_f64(output: &mut Vec<u8>, value: Option<f64>) {
     }
 }
 
+fn write_optional_u64(output: &mut Vec<u8>, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            output.push(1);
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        None => output.push(0),
+    }
+}
+
+fn write_optional_string(output: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            output.push(1);
+            write_string(output, value);
+        }
+        None => output.push(0),
+    }
+}
+
 struct Cursor<'a> {
     input: &'a [u8],
     offset: usize,
@@ -138,6 +205,27 @@ impl<'a> Cursor<'a> {
                 Ok(Some(f64::from_le_bytes(bytes.try_into().unwrap())))
             }
             _ => bail!("invalid optional f64 tag: {tag}"),
+        }
+    }
+
+    fn read_optional_u64(&mut self) -> Result<Option<u64>> {
+        let tag = self.read_exact(1)?[0];
+        match tag {
+            0 => Ok(None),
+            1 => {
+                let bytes = self.read_exact(8)?;
+                Ok(Some(u64::from_le_bytes(bytes.try_into().unwrap())))
+            }
+            _ => bail!("invalid optional u64 tag: {tag}"),
+        }
+    }
+
+    fn read_optional_string(&mut self) -> Result<Option<String>> {
+        let tag = self.read_exact(1)?[0];
+        match tag {
+            0 => Ok(None),
+            1 => Ok(Some(self.read_string()?)),
+            _ => bail!("invalid optional string tag: {tag}"),
         }
     }
 
@@ -184,6 +272,7 @@ mod tests {
         let message = ProtocolMessage::TextInjection {
             text: "SYSTEM OK".to_string(),
             class: MessageClass::Warning,
+            ttl_ms: Some(10_000),
         };
         let mut encoded = Vec::new();
 
@@ -202,8 +291,47 @@ mod tests {
             ProtocolMessage::TextInjection {
                 text: "SYSTEM OK".to_string(),
                 class: MessageClass::Info,
+                ttl_ms: None,
             }
         );
+    }
+
+    #[test]
+    fn round_trips_metric_stale_with_reason() {
+        let message = ProtocolMessage::MetricStale {
+            name: "thermal_zone".to_string(),
+            reason: Some("sensor timeout".to_string()),
+        };
+        let mut encoded = Vec::new();
+
+        message.encode(&mut encoded);
+
+        assert_eq!(ProtocolMessage::decode(&encoded).unwrap(), message);
+    }
+
+    #[test]
+    fn round_trips_metric_error_with_reason() {
+        let message = ProtocolMessage::MetricError {
+            name: "thermal_zone".to_string(),
+            reason: Some("read failed".to_string()),
+        };
+        let mut encoded = Vec::new();
+
+        message.encode(&mut encoded);
+
+        assert_eq!(ProtocolMessage::decode(&encoded).unwrap(), message);
+    }
+
+    #[test]
+    fn round_trips_metric_status_clear() {
+        let message = ProtocolMessage::MetricStatusClear {
+            name: "thermal_zone".to_string(),
+        };
+        let mut encoded = Vec::new();
+
+        message.encode(&mut encoded);
+
+        assert_eq!(ProtocolMessage::decode(&encoded).unwrap(), message);
     }
 
     #[test]

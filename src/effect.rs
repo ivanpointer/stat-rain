@@ -1,3 +1,4 @@
+use crate::health::HealthState;
 use crate::message::MessageClass;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -126,6 +127,8 @@ pub struct RenderCell {
     pub head_brightness_bucket: u8,
     pub ember_brightness_bucket: u8,
     pub ember_color_hotness_bucket: u8,
+    pub health_degraded: bool,
+    pub error_tint_bucket: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +155,7 @@ pub struct MessageTiming {
     pub fade_in: u64,
     pub stay: u64,
     pub fade_out: u64,
+    pub frame_delay: u64,
 }
 
 impl MessageOverlay {
@@ -177,8 +181,18 @@ impl MessageOverlay {
         self.age >= self.lifetime()
     }
 
+    pub fn refresh_stay(&mut self, stay: u64) {
+        self.stay = self.stay.max(stay);
+    }
+
     fn lifetime(&self) -> u64 {
         self.fade_in + self.stay + self.fade_out
+    }
+}
+
+impl MessageTiming {
+    pub fn stay_frames_for_ttl(self, ttl_frames: u64) -> u64 {
+        self.stay.max(ttl_frames)
     }
 }
 
@@ -333,6 +347,10 @@ impl RainEngine {
     }
 
     pub fn step(&mut self, state: EffectState) -> Frame {
+        self.step_with_health(state, &HealthState::default())
+    }
+
+    pub fn step_with_health(&mut self, state: EffectState, health: &HealthState) -> Frame {
         let mut cells = Vec::with_capacity(self.width * self.height);
         let speed = state.speed.max(0.0);
         let density = state.density.clamp(0.0, 1.0);
@@ -396,7 +414,7 @@ impl RainEngine {
                     self.glyph_for(x, y, local_churn, state.glyph_set, best_trace_seed)
                 };
 
-                cells.push(RenderCell {
+                let mut cell = RenderCell {
                     glyph,
                     color_hotness_bucket: hotness,
                     message_color_bucket: 0,
@@ -404,7 +422,11 @@ impl RainEngine {
                     head_brightness_bucket,
                     ember_brightness_bucket: bucket(ember_brightness),
                     ember_color_hotness_bucket: bucket(state.ember_color_hotness),
-                });
+                    health_degraded: false,
+                    error_tint_bucket: 0,
+                };
+                apply_health_to_cell(&mut cell, health, self.tick);
+                cells.push(cell);
             }
         }
 
@@ -520,6 +542,19 @@ impl RainEngine {
         self.columns[x].seed
             ^ (x as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
             ^ (y as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9)
+    }
+}
+
+fn apply_health_to_cell(cell: &mut RenderCell, health: &HealthState, tick: u64) {
+    if !health.is_degraded() || cell.message_color_bucket > 0 || cell.glyph == ' ' {
+        return;
+    }
+
+    cell.health_degraded = true;
+    cell.color_hotness_bucket = 0;
+    cell.ember_color_hotness_bucket = 0;
+    if health.has_error() && (tick / 8) % 2 == 0 {
+        cell.error_tint_bucket = 96;
     }
 }
 
@@ -803,6 +838,54 @@ mod tests {
     }
 
     #[test]
+    fn degraded_health_marks_rain_cells_without_touching_blank_cells() {
+        let mut engine = RainEngine::new(8, 4, 7);
+        let health = HealthState {
+            stale_metrics: vec!["cpu".to_string()],
+            error_metrics: Vec::new(),
+        };
+
+        let frame = engine.step_with_health(
+            EffectState {
+                density: 1.0,
+                ..EffectState::default()
+            },
+            &health,
+        );
+
+        assert!(frame
+            .cells
+            .iter()
+            .any(|cell| cell.glyph != ' ' && cell.health_degraded));
+        assert!(frame
+            .cells
+            .iter()
+            .all(|cell| cell.glyph != ' ' || !cell.health_degraded));
+    }
+
+    #[test]
+    fn error_health_adds_error_tint_to_rain_cells() {
+        let mut engine = RainEngine::new(8, 4, 7);
+        let health = HealthState {
+            stale_metrics: Vec::new(),
+            error_metrics: vec!["cpu".to_string()],
+        };
+
+        let frame = engine.step_with_health(
+            EffectState {
+                density: 1.0,
+                ..EffectState::default()
+            },
+            &health,
+        );
+
+        assert!(frame
+            .cells
+            .iter()
+            .any(|cell| cell.health_degraded && cell.error_tint_bucket > 0));
+    }
+
+    #[test]
     fn about_half_of_ember_glyphs_never_change_during_full_fade_window() {
         let mut engine = RainEngine::new(120, 40, 7);
         let state = EffectState {
@@ -1043,6 +1126,8 @@ mod tests {
             head_brightness_bucket: 0,
             ember_brightness_bucket: 0,
             ember_color_hotness_bucket: 0,
+            health_degraded: false,
+            error_tint_bucket: 0,
         };
         let mut message = MessageOverlay {
             age: 61,
@@ -1073,6 +1158,8 @@ mod tests {
             head_brightness_bucket: 0,
             ember_brightness_bucket: 0,
             ember_color_hotness_bucket: 0,
+            health_degraded: false,
+            error_tint_bucket: 0,
         };
         let mut message = MessageOverlay {
             age: 61,
@@ -1307,6 +1394,8 @@ mod tests {
             head_brightness_bucket: 0,
             ember_brightness_bucket: 0,
             ember_color_hotness_bucket: 0,
+            health_degraded: false,
+            error_tint_bucket: 0,
         }
     }
 
