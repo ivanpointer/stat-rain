@@ -47,7 +47,10 @@ To change synthetic metrics while the rain is running, use two terminals. In the
 rain pane:
 
 ```sh
-cargo run -- run --socket /tmp/stat-rain.sock
+cargo run -- run --socket /tmp/stat-rain.sock \
+  --message-fade-in-frames 45 \
+  --message-stay-frames 90 \
+  --message-fade-out-frames 90
 ```
 
 In another pane:
@@ -61,7 +64,9 @@ cargo run -- send --socket /tmp/stat-rain.sock --message "BUILD OK"
 
 The pushed `cpu` metric also updates `cpu.total`, and external values stay
 authoritative over built-in CPU samples until another value is pushed.
-Pushed messages render as a short-lived bright overlay in the rain.
+Pushed messages render centered as a short-lived bright overlay. Characters
+resolve in randomized order during fade-in, hold stable, then fade with
+per-character jitter.
 
 `devbox` provides the project toolchain when available:
 

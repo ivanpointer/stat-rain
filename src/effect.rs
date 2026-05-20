@@ -136,16 +136,27 @@ pub struct Frame {
 pub struct MessageOverlay {
     pub text: String,
     pub age: u64,
-    pub lifetime: u64,
+    pub fade_in: u64,
+    pub stay: u64,
+    pub fade_out: u64,
     seed: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageTiming {
+    pub fade_in: u64,
+    pub stay: u64,
+    pub fade_out: u64,
+}
+
 impl MessageOverlay {
-    pub fn new(text: String, lifetime: u64, seed: u64) -> Self {
+    pub fn new(text: String, fade_in: u64, stay: u64, fade_out: u64, seed: u64) -> Self {
         Self {
             text,
             age: 0,
-            lifetime: lifetime.max(1),
+            fade_in,
+            stay,
+            fade_out,
             seed,
         }
     }
@@ -155,7 +166,11 @@ impl MessageOverlay {
     }
 
     pub fn is_expired(&self) -> bool {
-        self.age >= self.lifetime
+        self.age >= self.lifetime()
+    }
+
+    fn lifetime(&self) -> u64 {
+        self.fade_in + self.stay + self.fade_out.max(1)
     }
 }
 
@@ -169,16 +184,19 @@ pub fn apply_message_overlay(frame: &mut Frame, message: &MessageOverlay, intens
         return;
     }
 
-    let row = message.seed as usize % frame.height;
+    let row = frame.height / 2;
     let start_x = frame.width.saturating_sub(visible_chars.len()) / 2;
-    let fade = 1.0 - message.age as f64 / message.lifetime as f64;
-    let brightness = fade * (0.65 + intensity.clamp(0.0, 1.0) * 0.35);
-    let brightness_bucket = bucket(brightness);
 
     for (offset, glyph) in visible_chars.into_iter().enumerate() {
         if glyph == ' ' {
             continue;
         }
+        let char_hash = mix_hash(message.seed ^ (offset as u64).wrapping_mul(0x9e37_79b9));
+        let Some((glyph, brightness_bucket)) =
+            message_glyph_and_brightness(message, offset, glyph, char_hash, intensity)
+        else {
+            continue;
+        };
         let index = row * frame.width + start_x + offset;
         let cell = &mut frame.cells[index];
         cell.glyph = glyph;
@@ -186,6 +204,57 @@ pub fn apply_message_overlay(frame: &mut Frame, message: &MessageOverlay, intens
         cell.head_brightness_bucket = cell.head_brightness_bucket.max(brightness_bucket);
         cell.ember_brightness_bucket = 0;
     }
+}
+
+fn message_glyph_and_brightness(
+    message: &MessageOverlay,
+    offset: usize,
+    target: char,
+    char_hash: u64,
+    intensity: f64,
+) -> Option<(char, u8)> {
+    let reveal_at = if message.fade_in == 0 {
+        0
+    } else {
+        char_hash % message.fade_in
+    };
+    let max_brightness = 0.72 + intensity.clamp(0.0, 1.0) * 0.28;
+
+    if message.age < message.fade_in {
+        let brightness =
+            ((message.age + 1) as f64 / message.fade_in.max(1) as f64) * max_brightness;
+        let glyph = if message.age >= reveal_at {
+            target
+        } else {
+            message_noise_glyph(offset, message.age, char_hash)
+        };
+        return Some((glyph, bucket(brightness)));
+    }
+
+    let stay_end = message.fade_in + message.stay;
+    if message.age < stay_end {
+        return Some((target, bucket(max_brightness)));
+    }
+
+    let fade_age = message.age.saturating_sub(stay_end);
+    let fade_length = jittered_message_fade(message.fade_out, char_hash);
+    if fade_age >= fade_length {
+        return None;
+    }
+    let brightness = (1.0 - fade_age as f64 / fade_length as f64) * max_brightness;
+    Some((target, bucket(brightness)))
+}
+
+fn jittered_message_fade(base: u64, hash: u64) -> u64 {
+    let base = base.max(1);
+    base + (mix_hash(hash) % (base / 2 + 1))
+}
+
+fn message_noise_glyph(offset: usize, age: u64, hash: u64) -> char {
+    const GLYPHS: &[char] = &[
+        '0', '1', '3', '7', '9', 'a', 'b', 'x', 'z', '+', '-', '*', '/', '|', ':', '.', '=', '#',
+    ];
+    GLYPHS[(hash.wrapping_add(age * 13).wrapping_add(offset as u64 * 7) as usize) % GLYPHS.len()]
 }
 
 #[derive(Debug, Clone)]
@@ -854,7 +923,7 @@ mod tests {
             height: 5,
             cells: vec![blank_cell(); 60],
         };
-        let message = MessageOverlay::new("ALERT".to_string(), 120, 7);
+        let message = MessageOverlay::new("ALERT".to_string(), 0, 120, 0, 7);
 
         apply_message_overlay(&mut frame, &message, 0.0);
 
@@ -868,35 +937,74 @@ mod tests {
     }
 
     #[test]
-    fn message_overlay_fades_with_age() {
-        let mut fresh_frame = Frame {
+    fn message_overlay_centers_text_vertically() {
+        let mut frame = Frame {
+            width: 13,
+            height: 5,
+            cells: vec![blank_cell(); 65],
+        };
+        let message = MessageOverlay::new("HEY".to_string(), 0, 120, 0, 7);
+
+        apply_message_overlay(&mut frame, &message, 0.0);
+
+        let message_indices = frame
+            .cells
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cell)| (cell.head_brightness_bucket > 0).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(message_indices, vec![31, 32, 33]);
+    }
+
+    #[test]
+    fn message_overlay_reveals_letters_in_random_order() {
+        let mut early_frame = Frame {
             width: 12,
             height: 5,
             cells: vec![blank_cell(); 60],
         };
-        let mut faded_frame = fresh_frame.clone();
-        let fresh = MessageOverlay::new("A".to_string(), 120, 7);
-        let faded = MessageOverlay {
-            age: 90,
-            ..fresh.clone()
+        let mut stay_frame = early_frame.clone();
+        let early = MessageOverlay {
+            age: 8,
+            ..MessageOverlay::new("ALERT".to_string(), 30, 60, 30, 7)
+        };
+        let stay = MessageOverlay {
+            age: 31,
+            ..early.clone()
         };
 
-        apply_message_overlay(&mut fresh_frame, &fresh, 0.0);
-        apply_message_overlay(&mut faded_frame, &faded, 0.0);
+        apply_message_overlay(&mut early_frame, &early, 0.0);
+        apply_message_overlay(&mut stay_frame, &stay, 0.0);
 
-        let fresh_brightness = fresh_frame
+        let early_rendered = rendered_message_chars(&early_frame);
+        let stay_rendered = rendered_message_chars(&stay_frame);
+        assert_ne!(early_rendered, "ALERT");
+        assert_eq!(stay_rendered, "ALERT");
+        assert!(early_rendered.chars().any(|glyph| !"ALERT".contains(glyph)));
+    }
+
+    #[test]
+    fn message_overlay_fades_out_with_per_character_jitter() {
+        let mut frame = Frame {
+            width: 12,
+            height: 5,
+            cells: vec![blank_cell(); 60],
+        };
+        let message = MessageOverlay {
+            age: 105,
+            ..MessageOverlay::new("ALERT".to_string(), 0, 60, 60, 7)
+        };
+
+        apply_message_overlay(&mut frame, &message, 0.0);
+
+        let brightnesses = frame
             .cells
             .iter()
-            .find(|cell| cell.glyph == 'A')
-            .unwrap()
-            .head_brightness_bucket;
-        let faded_brightness = faded_frame
-            .cells
-            .iter()
-            .find(|cell| cell.glyph == 'A')
-            .unwrap()
-            .head_brightness_bucket;
-        assert!(fresh_brightness > faded_brightness);
+            .filter(|cell| cell.head_brightness_bucket > 0)
+            .map(|cell| cell.head_brightness_bucket)
+            .collect::<Vec<_>>();
+        assert!(brightnesses.len() > 1);
+        assert!(brightnesses.iter().min() != brightnesses.iter().max());
     }
 
     #[test]
@@ -1081,5 +1189,14 @@ mod tests {
             ember_brightness_bucket: 0,
             ember_color_hotness_bucket: 0,
         }
+    }
+
+    fn rendered_message_chars(frame: &Frame) -> String {
+        frame
+            .cells
+            .iter()
+            .filter(|cell| cell.head_brightness_bucket > 0)
+            .map(|cell| cell.glyph)
+            .collect()
     }
 }

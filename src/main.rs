@@ -2,7 +2,9 @@ use anyhow::{bail, Result};
 use stat_rain::cli::{Cli, Command, RunArgs, SendArgs, StressCpuArgs};
 use stat_rain::config::AppConfig;
 use stat_rain::dev_tools;
-use stat_rain::effect::{apply_message_overlay, EffectSmoother, GlyphSet, MessageOverlay};
+use stat_rain::effect::{
+    apply_message_overlay, EffectSmoother, GlyphSet, MessageOverlay, MessageTiming,
+};
 use stat_rain::metrics::{MetricProvider, MetricRegistry, MetricValue};
 use stat_rain::protocol::{self, ProtocolMessage};
 use stat_rain::system_metrics::BuiltinSystemProvider;
@@ -69,6 +71,7 @@ fn run(args: RunArgs) -> Result<()> {
 pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
     let config = load_config(&args)?;
     let simulated_metrics = dev_tools::parse_simulated_metrics(&args.simulated_metrics)?;
+    let message_timing = message_timing_from_args(&args);
     let mut metrics = initial_metric_registry();
     let mut external_overrides = ExternalMetricOverrides::default();
     let mut active_message: Option<MessageOverlay> = None;
@@ -107,6 +110,7 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
             &mut metrics,
             &mut external_overrides,
             &mut active_message,
+            message_timing,
         );
         if last_metric_sample.elapsed() >= metric_interval {
             sample_builtin_metrics(&mut provider, &mut metrics);
@@ -206,12 +210,13 @@ fn drain_socket_messages(
     metrics: &mut MetricRegistry,
     overrides: &mut ExternalMetricOverrides,
     active_message: &mut Option<MessageOverlay>,
+    message_timing: MessageTiming,
 ) {
     let Some(socket_input) = socket_input else {
         return;
     };
     while let Ok(message) = socket_input.receiver.try_recv() {
-        apply_protocol_message(metrics, overrides, active_message, message);
+        apply_protocol_message(metrics, overrides, active_message, message_timing, message);
     }
 }
 
@@ -237,6 +242,7 @@ fn apply_protocol_message(
     metrics: &mut MetricRegistry,
     overrides: &mut ExternalMetricOverrides,
     active_message: &mut Option<MessageOverlay>,
+    message_timing: MessageTiming,
     message: ProtocolMessage,
 ) {
     match message {
@@ -254,8 +260,22 @@ fn apply_protocol_message(
             overrides.apply_to(metrics);
         }
         ProtocolMessage::TextInjection { text } => {
-            *active_message = Some(MessageOverlay::new(text, 180, 0x5445_5854));
+            *active_message = Some(MessageOverlay::new(
+                text,
+                message_timing.fade_in,
+                message_timing.stay,
+                message_timing.fade_out,
+                0x5445_5854,
+            ));
         }
+    }
+}
+
+fn message_timing_from_args(args: &RunArgs) -> MessageTiming {
+    MessageTiming {
+        fade_in: args.message_fade_in_frames,
+        stay: args.message_stay_frames,
+        fade_out: args.message_fade_out_frames,
     }
 }
 
@@ -355,8 +375,19 @@ mod tests {
             raw: None,
             normalized: Some(0.99),
         };
+        let timing = MessageTiming {
+            fade_in: 1,
+            stay: 1,
+            fade_out: 1,
+        };
 
-        apply_protocol_message(&mut metrics, &mut overrides, &mut active_message, message);
+        apply_protocol_message(
+            &mut metrics,
+            &mut overrides,
+            &mut active_message,
+            timing,
+            message,
+        );
         metrics.set("cpu", MetricValue::new(None, Some(0.01)));
         metrics.set("cpu.total", MetricValue::new(None, Some(0.01)));
         overrides.apply_to(&mut metrics);
@@ -373,10 +404,25 @@ mod tests {
         let message = stat_rain::protocol::ProtocolMessage::TextInjection {
             text: "BUILD OK".to_string(),
         };
+        let timing = MessageTiming {
+            fade_in: 12,
+            stay: 34,
+            fade_out: 56,
+        };
 
-        apply_protocol_message(&mut metrics, &mut overrides, &mut active_message, message);
+        apply_protocol_message(
+            &mut metrics,
+            &mut overrides,
+            &mut active_message,
+            timing,
+            message,
+        );
 
-        assert_eq!(active_message.unwrap().text, "BUILD OK");
+        let active_message = active_message.unwrap();
+        assert_eq!(active_message.text, "BUILD OK");
+        assert_eq!(active_message.fade_in, 12);
+        assert_eq!(active_message.stay, 34);
+        assert_eq!(active_message.fade_out, 56);
     }
 }
 

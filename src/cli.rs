@@ -49,6 +49,15 @@ pub struct RunArgs {
     #[arg(long = "effect-smoothing-ms", default_value_t = 10_000)]
     pub effect_smoothing_ms: u64,
 
+    #[arg(long = "message-fade-in-frames", default_value_t = 45)]
+    pub message_fade_in_frames: u64,
+
+    #[arg(long = "message-stay-frames", default_value_t = 90)]
+    pub message_stay_frames: u64,
+
+    #[arg(long = "message-fade-out-frames", default_value_t = 90)]
+    pub message_fade_out_frames: u64,
+
     #[arg(long)]
     pub width: Option<usize>,
 
