@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.14.2/.schema/devbox.schema.json",
+  "packages": [
+    "rustup@latest",
+    "cargo-nextest@latest",
+    "cargo-criterion@latest",
+    "hyperfine@latest",
+    "valgrind@latest",
+    "gnumake@latest"
+  ],
+  "shell": {
+    "init_hook": [
+      "rustup default stable >/dev/null 2>&1 || true"
+    ]
+  }
+}
