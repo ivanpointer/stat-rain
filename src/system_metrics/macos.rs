@@ -1,15 +1,20 @@
 use crate::metrics::{
-    normalized_cpu_usage, normalized_memory_usage, CpuTicks, MetricProvider, MetricSample,
-    MetricValue,
+    normalized_cpu_usage, normalized_io_rate, normalized_memory_usage, CpuTicks, MetricProvider,
+    MetricSample, MetricValue,
 };
 use anyhow::{Context, Result};
 use std::ffi::CString;
 use std::mem::{size_of, MaybeUninit};
 use std::ptr;
+use std::time::Instant;
+
+const NETWORK_IO_MAX_BYTES_PER_SEC: f64 = 125_000_000.0;
 
 #[derive(Debug, Default)]
 pub struct MacosSystemProvider {
     previous_cpu: Option<CpuTicks>,
+    previous_network_bytes: Option<u64>,
+    previous_network_sample: Option<Instant>,
 }
 
 impl MacosSystemProvider {
@@ -18,6 +23,22 @@ impl MacosSystemProvider {
     }
 
     fn sample_from_values(&mut self, cpu: CpuTicks, memory: MacosMemory) -> MetricSample {
+        let now = Instant::now();
+        let elapsed_secs = self
+            .previous_network_sample
+            .map(|previous| now.duration_since(previous).as_secs_f64())
+            .unwrap_or(0.0);
+        let network_bytes = read_network_bytes().ok();
+        self.sample_from_values_with_io(cpu, memory, network_bytes, elapsed_secs)
+    }
+
+    fn sample_from_values_with_io(
+        &mut self,
+        cpu: CpuTicks,
+        memory: MacosMemory,
+        network_bytes: Option<u64>,
+        elapsed_secs: f64,
+    ) -> MetricSample {
         let mut sample = MetricSample::default();
 
         if let Some(previous_cpu) = self.previous_cpu {
@@ -36,6 +57,21 @@ impl MacosSystemProvider {
                 "memory",
                 MetricValue::new(Some(normalized * 100.0), Some(normalized)),
             );
+        }
+
+        if let Some(network_bytes) = network_bytes {
+            if let Some(previous_network_bytes) = self.previous_network_bytes {
+                if let Some((raw, normalized)) = normalized_io_rate(
+                    previous_network_bytes,
+                    network_bytes,
+                    elapsed_secs,
+                    NETWORK_IO_MAX_BYTES_PER_SEC,
+                ) {
+                    sample.set("network_io", MetricValue::new(Some(raw), Some(normalized)));
+                }
+            }
+            self.previous_network_bytes = Some(network_bytes);
+            self.previous_network_sample = Some(Instant::now());
         }
 
         sample
@@ -139,6 +175,31 @@ fn sysctl_u64(name: &str) -> Result<u64> {
     Ok(value)
 }
 
+fn read_network_bytes() -> Result<u64> {
+    let mut addrs: *mut libc::ifaddrs = ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut addrs) } != 0 {
+        anyhow::bail!("getifaddrs failed");
+    }
+
+    let mut total = 0_u64;
+    let mut current = addrs;
+    while !current.is_null() {
+        let ifaddr = unsafe { &*current };
+        if !ifaddr.ifa_addr.is_null()
+            && !ifaddr.ifa_data.is_null()
+            && unsafe { (*ifaddr.ifa_addr).sa_family as i32 } == libc::AF_LINK
+            && ifaddr.ifa_flags & (libc::IFF_LOOPBACK as u32) == 0
+        {
+            let data = unsafe { &*(ifaddr.ifa_data as *const libc::if_data) };
+            total = total.saturating_add(data.ifi_ibytes as u64 + data.ifi_obytes as u64);
+        }
+        current = ifaddr.ifa_next;
+    }
+
+    unsafe { libc::freeifaddrs(addrs) };
+    Ok(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,7 +236,7 @@ mod tests {
     #[test]
     fn samples_memory_and_second_cpu_reading() {
         let mut provider = MacosSystemProvider::new();
-        let first = provider.sample_from_values(
+        let first = provider.sample_from_values_with_io(
             CpuTicks {
                 user: 100,
                 nice: 0,
@@ -186,8 +247,10 @@ mod tests {
                 total_bytes: 1_000,
                 available_bytes: 500,
             },
+            Some(1_000),
+            0.0,
         );
-        let second = provider.sample_from_values(
+        let second = provider.sample_from_values_with_io(
             CpuTicks {
                 user: 150,
                 nice: 0,
@@ -198,6 +261,8 @@ mod tests {
                 total_bytes: 1_000,
                 available_bytes: 250,
             },
+            Some(3_000),
+            2.0,
         );
 
         assert!(first.get("cpu").is_none());
@@ -205,5 +270,6 @@ mod tests {
         assert_eq!(second.get("cpu").unwrap().normalized, Some(0.5));
         assert_eq!(second.get("cpu.total").unwrap().normalized, Some(0.5));
         assert_eq!(second.get("memory").unwrap().normalized, Some(0.75));
+        assert_eq!(second.get("network_io").unwrap().raw, Some(1_000.0));
     }
 }

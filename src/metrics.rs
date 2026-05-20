@@ -136,6 +136,21 @@ pub fn normalized_memory_usage(total: u64, available: u64) -> Option<f64> {
     Some((1.0 - available as f64 / total as f64).clamp(0.0, 1.0))
 }
 
+pub fn normalized_io_rate(
+    previous: u64,
+    current: u64,
+    elapsed_secs: f64,
+    max_rate: f64,
+) -> Option<(f64, f64)> {
+    if elapsed_secs <= 0.0 || max_rate <= 0.0 || !elapsed_secs.is_finite() || !max_rate.is_finite()
+    {
+        return None;
+    }
+    let delta = current.checked_sub(previous)? as f64;
+    let rate = delta / elapsed_secs;
+    Some((rate, (rate / max_rate).clamp(0.0, 1.0)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +180,14 @@ mod tests {
         let usage = normalized_memory_usage(1_000, 250).unwrap();
 
         assert_eq!(usage, 0.75);
+    }
+
+    #[test]
+    fn normalizes_io_rate_from_counter_delta() {
+        let (raw, normalized) = normalized_io_rate(1_000, 3_000, 2.0, 4_000.0).unwrap();
+
+        assert_eq!(raw, 1_000.0);
+        assert_eq!(normalized, 0.25);
     }
 
     #[test]

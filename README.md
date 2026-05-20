@@ -6,7 +6,7 @@ The first version is a passive visual monitor for tmux-style panes. It maps metr
 
 Metric-driven effect changes are smoothed over a 4 second window by default. Use `--effect-smoothing-ms` to tune that window, or set it to `0` for immediate changes.
 
-The built-in `cpu` metric is aggregate CPU usage across the machine. `cpu.total` is also exposed as an explicit alias for configs that should make that aggregate behavior obvious.
+The built-in `cpu` metric is aggregate CPU usage across the machine. `cpu.total` is also exposed as an explicit alias for configs that should make that aggregate behavior obvious. `memory` and `network_io` are available as normalized metrics on macOS and Linux. `disk_io` is built in on Linux and can be pushed or simulated externally on macOS until a native IOKit disk provider lands. `disk_io.raw` and `network_io.raw` are bytes per second when available.
 
 ## Development
 
@@ -30,6 +30,8 @@ values:
 cargo run -- run \
   --simulate-metric cpu=1.0 \
   --simulate-metric memory=0.9 \
+  --simulate-metric disk_io=0.8 \
+  --simulate-metric network_io=0.6 \
   --simulate-metric thermal_zone=95:0.95
 ```
 
@@ -92,6 +94,13 @@ make send-error MSG="BUILD FAILED"
 make send-stale METRIC=thermal_zone REASON="sensor timeout"
 make send-metric-error METRIC=thermal_zone REASON="read failed"
 make clear-status METRIC=thermal_zone
+```
+
+The generated starter config includes a `system_activity` profile that maps CPU,
+memory, disk IO, and network IO across the rain field:
+
+```sh
+cargo run -- run --config examples/stat-rain.toml --profile system_activity
 ```
 
 `devbox` provides the project toolchain when available:

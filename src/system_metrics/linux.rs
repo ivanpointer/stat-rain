@@ -1,13 +1,19 @@
 use crate::metrics::{
-    normalized_cpu_usage, normalized_memory_usage, CpuTicks, MetricProvider, MetricSample,
-    MetricValue,
+    normalized_cpu_usage, normalized_io_rate, normalized_memory_usage, CpuTicks, MetricProvider,
+    MetricSample, MetricValue,
 };
 use anyhow::{Context, Result};
 use std::fs;
+use std::time::Instant;
+
+const DISK_IO_MAX_BYTES_PER_SEC: f64 = 250_000_000.0;
+const NETWORK_IO_MAX_BYTES_PER_SEC: f64 = 125_000_000.0;
 
 #[derive(Debug, Default)]
 pub struct LinuxSystemProvider {
     previous_cpu: Option<CpuTicks>,
+    previous_io: Option<IoCounters>,
+    previous_io_sample: Option<Instant>,
 }
 
 impl LinuxSystemProvider {
@@ -15,9 +21,36 @@ impl LinuxSystemProvider {
         Self::default()
     }
 
-    fn sample_from_strings(&mut self, stat: &str, meminfo: &str) -> Result<MetricSample> {
+    fn sample_from_strings(
+        &mut self,
+        stat: &str,
+        meminfo: &str,
+        diskstats: &str,
+        netdev: &str,
+    ) -> Result<MetricSample> {
+        let now = Instant::now();
+        let elapsed_secs = self
+            .previous_io_sample
+            .map(|previous| now.duration_since(previous).as_secs_f64())
+            .unwrap_or(0.0);
+        self.sample_from_strings_with_elapsed(stat, meminfo, diskstats, netdev, elapsed_secs)
+    }
+
+    fn sample_from_strings_with_elapsed(
+        &mut self,
+        stat: &str,
+        meminfo: &str,
+        diskstats: &str,
+        netdev: &str,
+        elapsed_secs: f64,
+    ) -> Result<MetricSample> {
         let current_cpu = parse_proc_stat(stat).context("failed to parse /proc/stat")?;
         let memory = parse_proc_meminfo(meminfo).context("failed to parse /proc/meminfo")?;
+        let current_io = IoCounters {
+            disk_bytes: parse_proc_diskstats(diskstats)
+                .context("failed to parse /proc/diskstats")?,
+            network_bytes: parse_proc_net_dev(netdev).context("failed to parse /proc/net/dev")?,
+        };
         let mut sample = MetricSample::default();
 
         if let Some(previous_cpu) = self.previous_cpu {
@@ -36,6 +69,27 @@ impl LinuxSystemProvider {
             );
         }
 
+        if let Some(previous_io) = self.previous_io {
+            if let Some((raw, normalized)) = normalized_io_rate(
+                previous_io.disk_bytes,
+                current_io.disk_bytes,
+                elapsed_secs,
+                DISK_IO_MAX_BYTES_PER_SEC,
+            ) {
+                sample.set("disk_io", MetricValue::new(Some(raw), Some(normalized)));
+            }
+            if let Some((raw, normalized)) = normalized_io_rate(
+                previous_io.network_bytes,
+                current_io.network_bytes,
+                elapsed_secs,
+                NETWORK_IO_MAX_BYTES_PER_SEC,
+            ) {
+                sample.set("network_io", MetricValue::new(Some(raw), Some(normalized)));
+            }
+        }
+        self.previous_io = Some(current_io);
+        self.previous_io_sample = Some(Instant::now());
+
         Ok(sample)
     }
 }
@@ -45,8 +99,17 @@ impl MetricProvider for LinuxSystemProvider {
         let stat = fs::read_to_string("/proc/stat").context("failed to read /proc/stat")?;
         let meminfo =
             fs::read_to_string("/proc/meminfo").context("failed to read /proc/meminfo")?;
-        self.sample_from_strings(&stat, &meminfo)
+        let diskstats =
+            fs::read_to_string("/proc/diskstats").context("failed to read /proc/diskstats")?;
+        let netdev = fs::read_to_string("/proc/net/dev").context("failed to read /proc/net/dev")?;
+        self.sample_from_strings(&stat, &meminfo, &diskstats, &netdev)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IoCounters {
+    disk_bytes: u64,
+    network_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +171,73 @@ fn parse_kib(value: &str) -> Result<u64> {
         .context("invalid KiB value")
 }
 
+fn parse_proc_diskstats(input: &str) -> Result<u64> {
+    let mut total_sectors = 0_u64;
+
+    for line in input.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 10 {
+            continue;
+        }
+        let name = fields[2];
+        if is_ignored_block_device(name) {
+            continue;
+        }
+        let sectors_read = fields[5]
+            .parse::<u64>()
+            .context("invalid sectors read field")?;
+        let sectors_written = fields[9]
+            .parse::<u64>()
+            .context("invalid sectors written field")?;
+        total_sectors = total_sectors.saturating_add(sectors_read.saturating_add(sectors_written));
+    }
+
+    Ok(total_sectors.saturating_mul(512))
+}
+
+fn is_ignored_block_device(name: &str) -> bool {
+    name.starts_with("loop")
+        || name.starts_with("ram")
+        || name.starts_with("fd")
+        || is_partition_name(name)
+}
+
+fn is_partition_name(name: &str) -> bool {
+    if name.starts_with("nvme") || name.starts_with("mmcblk") {
+        return name
+            .rsplit_once('p')
+            .is_some_and(|(_, partition)| partition.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    (name.starts_with("sd") || name.starts_with("vd") || name.starts_with("xvd"))
+        && name
+            .chars()
+            .last()
+            .is_some_and(|last| last.is_ascii_digit())
+}
+
+fn parse_proc_net_dev(input: &str) -> Result<u64> {
+    let mut total_bytes = 0_u64;
+
+    for line in input.lines() {
+        let Some((name, values)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim() == "lo" {
+            continue;
+        }
+        let fields = values.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 16 {
+            continue;
+        }
+        let rx_bytes = fields[0].parse::<u64>().context("invalid rx bytes field")?;
+        let tx_bytes = fields[8].parse::<u64>().context("invalid tx bytes field")?;
+        total_bytes = total_bytes.saturating_add(rx_bytes.saturating_add(tx_bytes));
+    }
+
+    Ok(total_bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,12 +280,17 @@ mod tests {
             .sample_from_strings(
                 "cpu 100 0 100 800\n",
                 "MemTotal: 1000 kB\nMemAvailable: 500 kB\n",
+                "8 0 sda 10 0 100 0 20 0 200 0 0 0 0 0 0 0 0 0\n",
+                "Inter-| Receive | Transmit\neth0: 1000 0 0 0 0 0 0 0 2000 0 0 0 0 0 0 0\n",
             )
             .unwrap();
         let second = provider
-            .sample_from_strings(
+            .sample_from_strings_with_elapsed(
                 "cpu 150 0 150 900\n",
                 "MemTotal: 1000 kB\nMemAvailable: 250 kB\n",
+                "8 0 sda 10 0 1100 0 20 0 1200 0 0 0 0 0 0 0 0 0\n",
+                "Inter-| Receive | Transmit\neth0: 2000 0 0 0 0 0 0 0 5000 0 0 0 0 0 0 0\n",
+                1.0,
             )
             .unwrap();
 
@@ -164,5 +299,27 @@ mod tests {
         assert_eq!(second.get("cpu").unwrap().normalized, Some(0.5));
         assert_eq!(second.get("cpu.total").unwrap().normalized, Some(0.5));
         assert_eq!(second.get("memory").unwrap().normalized, Some(0.75));
+        assert_eq!(second.get("disk_io").unwrap().raw, Some(1_024_000.0));
+        assert_eq!(second.get("network_io").unwrap().raw, Some(4_000.0));
+    }
+
+    #[test]
+    fn parses_proc_diskstats_total_read_and_written_bytes() {
+        let bytes = parse_proc_diskstats(
+            "7 0 loop0 1 0 999 0 1 0 999 0 0 0 0 0 0 0 0 0\n8 0 sda 10 0 100 0 20 0 200 0 0 0 0 0 0 0 0 0\n8 1 sda1 10 0 100 0 20 0 200 0 0 0 0 0 0 0 0 0\n259 0 nvme0n1 10 0 50 0 20 0 50 0 0 0 0 0 0 0 0 0\n259 1 nvme0n1p1 10 0 50 0 20 0 50 0 0 0 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+
+        assert_eq!(bytes, 400 * 512);
+    }
+
+    #[test]
+    fn parses_proc_net_dev_total_non_loopback_bytes() {
+        let bytes = parse_proc_net_dev(
+            "Inter-| Receive | Transmit\nlo: 10 0 0 0 0 0 0 0 20 0 0 0 0 0 0 0\neth0: 100 0 0 0 0 0 0 0 250 0 0 0 0 0 0 0\n",
+        )
+        .unwrap();
+
+        assert_eq!(bytes, 350);
     }
 }

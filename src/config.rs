@@ -266,4 +266,20 @@ mod tests {
             ])
         );
     }
+
+    #[test]
+    fn starter_system_activity_profile_maps_io_metrics() {
+        let config = AppConfig::from_toml_profile(
+            include_str!("../examples/stat-rain.toml"),
+            "system_activity",
+        )
+        .unwrap();
+
+        let references = config.referenced_metrics().unwrap();
+
+        assert!(references.contains("disk_io"));
+        assert!(references.contains("network_io"));
+        assert!(references.contains("cpu"));
+        assert!(references.contains("memory"));
+    }
 }

@@ -790,6 +790,8 @@ fn initial_metric_registry() -> MetricRegistry {
     metrics.set("cpu", MetricValue::new(Some(0.0), Some(0.0)));
     metrics.set("cpu.total", MetricValue::new(Some(0.0), Some(0.0)));
     metrics.set("memory", MetricValue::new(Some(0.0), Some(0.0)));
+    metrics.set("disk_io", MetricValue::new(Some(0.0), Some(0.0)));
+    metrics.set("network_io", MetricValue::new(Some(0.0), Some(0.0)));
     metrics.set("thermal_zone", MetricValue::new(Some(45.0), Some(0.45)));
     metrics.set(
         "external.message_pressure",
