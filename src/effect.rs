@@ -106,10 +106,10 @@ impl Default for EffectState {
             fade_length: 14.0,
             glyph_churn: 0.25,
             message_reveal_intensity: 0.0,
-            ember_density: 0.0025,
+            ember_density: 0.0015,
             ember_brightness: 0.9,
             ember_color_hotness: 0.0,
-            ember_fade_length: 60.0,
+            ember_fade_length: 80.0,
             glyph_set: GlyphSet::Unicode,
         }
     }
@@ -478,6 +478,7 @@ mod tests {
         let mut engine = RainEngine::new(8, 4, 7);
         let state = EffectState {
             density: 0.0,
+            ember_density: 0.0,
             ..EffectState::default()
         };
 
@@ -514,8 +515,8 @@ mod tests {
     fn default_embers_are_rare_and_slow_fading() {
         let state = EffectState::default();
 
-        assert_eq!(state.ember_density, 0.0025);
-        assert_eq!(state.ember_fade_length, 60.0);
+        assert_eq!(state.ember_density, 0.0015);
+        assert_eq!(state.ember_fade_length, 80.0);
     }
 
     #[test]
@@ -524,7 +525,7 @@ mod tests {
         let state = EffectState {
             density: 0.0,
             ember_density: 1.0,
-            ember_fade_length: 60.0,
+            ember_fade_length: 80.0,
             ember_brightness: 1.0,
             speed: 0.0,
             ..EffectState::default()
@@ -551,7 +552,7 @@ mod tests {
 
         assert!(lifetimes
             .iter()
-            .all(|lifetime| (60..=80).contains(lifetime)));
+            .all(|lifetime| (80..=107).contains(lifetime)));
         assert!(
             lifetimes.iter().min() != lifetimes.iter().max(),
             "expected jittered lifetimes, got {lifetimes:?}"
