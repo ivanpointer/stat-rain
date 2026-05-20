@@ -60,13 +60,25 @@ cargo run -- send --socket /tmp/stat-rain.sock --metric cpu --value 0.02
 cargo run -- send --socket /tmp/stat-rain.sock --metric cpu --value 0.99
 cargo run -- send --socket /tmp/stat-rain.sock --metric cpu --value 0.50
 cargo run -- send --socket /tmp/stat-rain.sock --message "BUILD OK"
+cargo run -- send --socket /tmp/stat-rain.sock --message "BUILD FAILED" --class error
 ```
 
 The pushed `cpu` metric also updates `cpu.total`, and external values stay
 authoritative over built-in CPU samples until another value is pushed.
 Pushed messages render centered as a short-lived bright overlay. Characters
 resolve in randomized order during fade-in, hold stable, then fade with
-per-character jitter.
+per-character jitter. Message classes are `info`, `success`, `warning`, and
+`error`; class changes tune the overlay hotness, brightness, and fade-out
+glitch intensity while preserving the same message lifecycle.
+
+The Make helpers accept the same classes:
+
+```sh
+make send-message MSG="DEPLOY STARTED" CLASS=info
+make send-success MSG="BUILD OK"
+make send-warning MSG="CPU HOT"
+make send-error MSG="BUILD FAILED"
+```
 
 `devbox` provides the project toolchain when available:
 

@@ -232,7 +232,10 @@ fn message_from_send_args(args: &SendArgs) -> Result<ProtocolMessage> {
                 normalized: Some(value),
             })
         }
-        (None, None, Some(text)) => Ok(ProtocolMessage::TextInjection { text: text.clone() }),
+        (None, None, Some(text)) => Ok(ProtocolMessage::TextInjection {
+            text: text.clone(),
+            class: args.class,
+        }),
         (Some(_), None, None) => bail!("--metric requires --value"),
         _ => bail!("provide either --metric with --value, or --message"),
     }
@@ -259,14 +262,16 @@ fn apply_protocol_message(
             overrides.mark_stale(name);
             overrides.apply_to(metrics);
         }
-        ProtocolMessage::TextInjection { text } => {
-            *active_message = Some(MessageOverlay::new(
+        ProtocolMessage::TextInjection { text, class } => {
+            let mut overlay = MessageOverlay::new(
                 text,
                 message_timing.fade_in,
                 message_timing.stay,
                 message_timing.fade_out,
                 0x5445_5854,
-            ));
+            );
+            overlay.class = class;
+            *active_message = Some(overlay);
         }
     }
 }
@@ -317,6 +322,7 @@ fn install_interrupt_flag() -> Result<Arc<AtomicBool>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stat_rain::message::MessageClass;
 
     #[test]
     fn rebuilds_engine_when_terminal_size_changes() {
@@ -353,6 +359,7 @@ mod tests {
             metric: Some("cpu".to_string()),
             value: Some(0.99),
             message: None,
+            class: MessageClass::Info,
         };
 
         assert_eq!(
@@ -361,6 +368,44 @@ mod tests {
                 name: "cpu".to_string(),
                 raw: None,
                 normalized: Some(0.99)
+            }
+        );
+    }
+
+    #[test]
+    fn send_message_args_default_to_info_class() {
+        let args = stat_rain::cli::SendArgs {
+            socket: "/tmp/stat-rain.sock".into(),
+            metric: None,
+            value: None,
+            message: Some("BUILD OK".to_string()),
+            class: MessageClass::Info,
+        };
+
+        assert_eq!(
+            message_from_send_args(&args).unwrap(),
+            stat_rain::protocol::ProtocolMessage::TextInjection {
+                text: "BUILD OK".to_string(),
+                class: MessageClass::Info,
+            }
+        );
+    }
+
+    #[test]
+    fn send_message_args_use_requested_error_class() {
+        let args = stat_rain::cli::SendArgs {
+            socket: "/tmp/stat-rain.sock".into(),
+            metric: None,
+            value: None,
+            message: Some("BUILD FAILED".to_string()),
+            class: MessageClass::Error,
+        };
+
+        assert_eq!(
+            message_from_send_args(&args).unwrap(),
+            stat_rain::protocol::ProtocolMessage::TextInjection {
+                text: "BUILD FAILED".to_string(),
+                class: MessageClass::Error,
             }
         );
     }
@@ -403,6 +448,7 @@ mod tests {
         let mut active_message = None;
         let message = stat_rain::protocol::ProtocolMessage::TextInjection {
             text: "BUILD OK".to_string(),
+            class: MessageClass::Warning,
         };
         let timing = MessageTiming {
             fade_in: 12,
@@ -420,6 +466,7 @@ mod tests {
 
         let active_message = active_message.unwrap();
         assert_eq!(active_message.text, "BUILD OK");
+        assert_eq!(active_message.class, MessageClass::Warning);
         assert_eq!(active_message.fade_in, 12);
         assert_eq!(active_message.stay, 34);
         assert_eq!(active_message.fade_out, 56);

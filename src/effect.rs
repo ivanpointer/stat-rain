@@ -1,3 +1,5 @@
+use crate::message::MessageClass;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EffectState {
     pub speed: f64,
@@ -139,6 +141,7 @@ pub struct MessageOverlay {
     pub fade_in: u64,
     pub stay: u64,
     pub fade_out: u64,
+    pub class: MessageClass,
     seed: u64,
 }
 
@@ -157,6 +160,7 @@ impl MessageOverlay {
             fade_in,
             stay,
             fade_out,
+            class: MessageClass::Info,
             seed,
         }
     }
@@ -202,6 +206,9 @@ pub fn apply_message_overlay(frame: &mut Frame, message: &MessageOverlay, intens
         cell.glyph = glyph;
         cell.brightness_bucket = cell.brightness_bucket.max(brightness_bucket);
         cell.head_brightness_bucket = cell.head_brightness_bucket.max(brightness_bucket);
+        cell.color_hotness_bucket = cell
+            .color_hotness_bucket
+            .max(message.class.color_hotness_bucket());
         cell.ember_brightness_bucket = 0;
     }
 }
@@ -218,7 +225,8 @@ fn message_glyph_and_brightness(
     } else {
         char_hash % message.fade_in
     };
-    let max_brightness = 0.72 + intensity.clamp(0.0, 1.0) * 0.28;
+    let max_brightness = message.class.brightness_floor() + intensity.clamp(0.0, 1.0) * 0.28;
+    let max_brightness = max_brightness.min(1.0);
 
     if message.age < message.fade_in {
         let brightness =
@@ -248,7 +256,13 @@ fn message_glyph_and_brightness(
     }
     let brightness = (1.0 - fade_age as f64 / fade_length as f64) * max_brightness;
     let progress = fade_age as f64 / fade_length as f64;
-    let glyph = if message_should_glitch(offset, message.age, char_hash, progress) {
+    let glyph = if message_should_glitch(
+        offset,
+        message.age,
+        char_hash,
+        progress,
+        message.class.glitch_boost(),
+    ) {
         message_noise_glyph(offset, message.age, char_hash)
     } else {
         target
@@ -268,12 +282,12 @@ fn message_fade_delay(base: u64, hash: u64) -> u64 {
     mix_hash(hash ^ 0xfeed_fade) % (base / 5 + 1)
 }
 
-fn message_should_glitch(offset: usize, age: u64, hash: u64, progress: f64) -> bool {
+fn message_should_glitch(offset: usize, age: u64, hash: u64, progress: f64, boost: f64) -> bool {
     if progress < 0.15 {
         return false;
     }
     let roll = mix_hash(hash ^ age.wrapping_mul(17) ^ (offset as u64).wrapping_mul(31)) % 100;
-    let threshold = 18 + (progress.clamp(0.0, 1.0) * 55.0) as u64;
+    let threshold = ((18.0 + progress.clamp(0.0, 1.0) * 55.0) * boost).min(96.0) as u64;
     roll < threshold
 }
 
@@ -601,6 +615,7 @@ fn bucket(value: f64) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::MessageClass;
     use std::time::Duration;
 
     #[test]
@@ -1081,6 +1096,47 @@ mod tests {
     }
 
     #[test]
+    fn message_overlay_applies_class_hotness() {
+        let mut frame = Frame {
+            width: 12,
+            height: 5,
+            cells: vec![blank_cell(); 60],
+        };
+        let message = MessageOverlay {
+            class: MessageClass::Error,
+            ..MessageOverlay::new("ALERT".to_string(), 0, 120, 0, 7)
+        };
+
+        apply_message_overlay(&mut frame, &message, 0.0);
+
+        let hotnesses = frame
+            .cells
+            .iter()
+            .filter(|cell| cell.head_brightness_bucket > 0)
+            .map(|cell| cell.color_hotness_bucket)
+            .collect::<Vec<_>>();
+        assert_eq!(hotnesses, vec![255, 255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn error_message_glitches_more_than_info_during_fade_out() {
+        let info = MessageOverlay {
+            age: 95,
+            class: MessageClass::Info,
+            ..MessageOverlay::new("ALERTALERTALERT".to_string(), 0, 60, 60, 7)
+        };
+        let error = MessageOverlay {
+            class: MessageClass::Error,
+            ..info.clone()
+        };
+
+        assert!(
+            fade_out_glitch_count(&error) > fade_out_glitch_count(&info),
+            "error messages should glitch more aggressively than info messages"
+        );
+    }
+
+    #[test]
     fn column_heads_drift_independently_over_time() {
         let mut engine = RainEngine::new(2, 32, 7);
         let state = EffectState {
@@ -1271,5 +1327,22 @@ mod tests {
             .filter(|cell| cell.head_brightness_bucket > 0)
             .map(|cell| cell.glyph)
             .collect()
+    }
+
+    fn fade_out_glitch_count(message: &MessageOverlay) -> usize {
+        message
+            .text
+            .chars()
+            .enumerate()
+            .filter(|(offset, target)| {
+                let char_hash = mix_hash(message.seed ^ (*offset as u64).wrapping_mul(0x9e37_79b9));
+                let Some((glyph, _)) =
+                    message_glyph_and_brightness(message, *offset, *target, char_hash, 0.0)
+                else {
+                    return false;
+                };
+                glyph != *target
+            })
+            .count()
     }
 }

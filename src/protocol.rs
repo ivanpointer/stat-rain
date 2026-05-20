@@ -1,3 +1,4 @@
+use crate::message::MessageClass;
 use anyhow::{bail, Result};
 use std::io::{Read, Write};
 
@@ -15,6 +16,7 @@ pub enum ProtocolMessage {
     },
     TextInjection {
         text: String,
+        class: MessageClass,
     },
 }
 
@@ -36,9 +38,10 @@ impl ProtocolMessage {
                 output.push(2);
                 write_string(output, name);
             }
-            Self::TextInjection { text } => {
+            Self::TextInjection { text, class } => {
                 output.push(3);
                 write_string(output, text);
+                output.push(class.to_wire());
             }
         }
     }
@@ -61,9 +64,15 @@ impl ProtocolMessage {
             2 => Ok(Self::MetricStale {
                 name: cursor.read_string()?,
             }),
-            3 => Ok(Self::TextInjection {
-                text: cursor.read_string()?,
-            }),
+            3 => {
+                let text = cursor.read_string()?;
+                let class = if cursor.remaining() == 0 {
+                    MessageClass::Info
+                } else {
+                    MessageClass::from_wire(cursor.read_u8()?)?
+                };
+                Ok(Self::TextInjection { text, class })
+            }
             kind => bail!("unsupported protocol message kind: {kind}"),
         }
     }
@@ -132,6 +141,14 @@ impl<'a> Cursor<'a> {
         }
     }
 
+    fn read_u8(&mut self) -> Result<u8> {
+        Ok(self.read_exact(1)?[0])
+    }
+
+    fn remaining(&self) -> usize {
+        self.input.len().saturating_sub(self.offset)
+    }
+
     fn read_exact(&mut self, len: usize) -> Result<&'a [u8]> {
         let end = self.offset + len;
         if end > self.input.len() {
@@ -146,6 +163,7 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::MessageClass;
 
     #[test]
     fn round_trips_metric_update() {
@@ -165,12 +183,27 @@ mod tests {
     fn round_trips_text_injection() {
         let message = ProtocolMessage::TextInjection {
             text: "SYSTEM OK".to_string(),
+            class: MessageClass::Warning,
         };
         let mut encoded = Vec::new();
 
         message.encode(&mut encoded);
 
         assert_eq!(ProtocolMessage::decode(&encoded).unwrap(), message);
+    }
+
+    #[test]
+    fn decodes_legacy_text_injection_as_info() {
+        let mut encoded = vec![PROTOCOL_VERSION, 3];
+        write_string(&mut encoded, "SYSTEM OK");
+
+        assert_eq!(
+            ProtocolMessage::decode(&encoded).unwrap(),
+            ProtocolMessage::TextInjection {
+                text: "SYSTEM OK".to_string(),
+                class: MessageClass::Info,
+            }
+        );
     }
 
     #[test]

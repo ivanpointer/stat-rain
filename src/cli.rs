@@ -1,3 +1,4 @@
+use crate::message::MessageClass;
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -93,6 +94,9 @@ pub struct SendArgs {
 
     #[arg(long)]
     pub message: Option<String>,
+
+    #[arg(long = "class", default_value_t = MessageClass::Info)]
+    pub class: MessageClass,
 }
 
 #[derive(Debug, Args)]

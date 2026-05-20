@@ -223,7 +223,12 @@ fn write_color(mut output: impl Write, cell: &RenderCell, color_mode: ColorMode)
 fn truecolor_rgb(cell: &RenderCell) -> (u8, u8, u8) {
     if cell.head_brightness_bucket > 0 {
         let head = cell.head_brightness_bucket;
-        return (scale_channel(head, 220), head, scale_channel(head, 220));
+        let hot = cell.color_hotness_bucket;
+        return (
+            scale_channel(head, 220).saturating_add(scale_channel(hot, 35)),
+            head.saturating_sub(scale_channel(hot, 110)),
+            scale_channel(head, 220).saturating_sub(scale_channel(hot, 180)),
+        );
     }
 
     if cell.ember_brightness_bucket > 0 {
@@ -375,6 +380,29 @@ mod tests {
         assert!(String::from_utf8(output)
             .unwrap()
             .contains("\x1b[38;2;220;255;220m"));
+    }
+
+    #[test]
+    fn truecolor_tints_hot_head_toward_red() {
+        let frame = Frame {
+            width: 1,
+            height: 1,
+            cells: vec![RenderCell {
+                glyph: '0',
+                color_hotness_bucket: 255,
+                brightness_bucket: 180,
+                head_brightness_bucket: 255,
+                ember_brightness_bucket: 0,
+                ember_color_hotness_bucket: 0,
+            }],
+        };
+        let mut output = Vec::new();
+
+        write_frame(&mut output, &frame, ColorMode::TrueColor).unwrap();
+
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("\x1b[38;2;255;145;40m"));
     }
 
     #[test]

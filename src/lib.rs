@@ -3,6 +3,7 @@ pub mod config;
 pub mod dev_tools;
 pub mod effect;
 pub mod mapping;
+pub mod message;
 pub mod metrics;
 pub mod protocol;
 pub mod system_metrics;

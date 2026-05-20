@@ -1,4 +1,4 @@
-.PHONY: build test bench profile run run-socket run-fake-idle run-fake-hot send-cpu-low send-cpu-mid send-cpu-hot send-message stress-cpu fmt check clean
+.PHONY: build test bench profile run run-socket run-fake-idle run-fake-hot send-cpu-low send-cpu-mid send-cpu-hot send-message send-info send-success send-warning send-error stress-cpu fmt check clean
 
 CARGO ?= cargo
 
@@ -36,7 +36,19 @@ send-cpu-hot:
 	$(CARGO) run -- send --socket /tmp/stat-rain.sock --metric cpu --value 0.99
 
 send-message:
-	$(CARGO) run -- send --socket /tmp/stat-rain.sock --message "$(MSG)"
+	$(CARGO) run -- send --socket /tmp/stat-rain.sock --message "$(MSG)" --class "$(or $(CLASS),info)"
+
+send-info:
+	$(CARGO) run -- send --socket /tmp/stat-rain.sock --message "$(MSG)" --class info
+
+send-success:
+	$(CARGO) run -- send --socket /tmp/stat-rain.sock --message "$(MSG)" --class success
+
+send-warning:
+	$(CARGO) run -- send --socket /tmp/stat-rain.sock --message "$(MSG)" --class warning
+
+send-error:
+	$(CARGO) run -- send --socket /tmp/stat-rain.sock --message "$(MSG)" --class error
 
 stress-cpu:
 	$(CARGO) run -- stress-cpu
