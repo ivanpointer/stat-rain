@@ -50,6 +50,7 @@ pub struct RainEngine {
     width: usize,
     height: usize,
     tick: u64,
+    phase: f64,
     rng: Lcg,
     column_offsets: Vec<usize>,
 }
@@ -65,6 +66,7 @@ impl RainEngine {
             width,
             height,
             tick: 0,
+            phase: 0.0,
             rng,
             column_offsets,
         }
@@ -80,8 +82,7 @@ impl RainEngine {
 
         for y in 0..self.height {
             for x in 0..self.width {
-                let head = ((self.tick as f64 * speed) as usize + self.column_offsets[x])
-                    % self.height.max(1);
+                let head = (self.phase as usize + self.column_offsets[x]) % self.height.max(1);
                 let distance = if y <= head {
                     head - y
                 } else {
@@ -106,6 +107,7 @@ impl RainEngine {
         }
 
         self.tick = self.tick.wrapping_add(1);
+        self.phase = (self.phase + speed) % self.height.max(1) as f64;
 
         Frame {
             width: self.width,
@@ -225,5 +227,44 @@ mod tests {
             .iter()
             .filter(|cell| cell.glyph != ' ')
             .all(|cell| cell.glyph.is_ascii()));
+    }
+
+    #[test]
+    fn speed_changes_advance_from_current_position() {
+        let mut engine = RainEngine::new(1, 100, 7);
+        let slow = EffectState {
+            density: 1.0,
+            fade_length: 1.0,
+            brightness: 1.0,
+            speed: 1.0,
+            ..EffectState::default()
+        };
+        let faster = EffectState { speed: 2.0, ..slow };
+
+        for _ in 0..50 {
+            engine.step(slow);
+        }
+        let before = brightest_row(&engine.step(slow));
+        let after = brightest_row(&engine.step(faster));
+
+        assert!(forward_distance(before, after, 100) <= 2);
+    }
+
+    fn brightest_row(frame: &Frame) -> usize {
+        frame
+            .cells
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, cell)| cell.brightness_bucket)
+            .map(|(index, _)| index / frame.width)
+            .unwrap()
+    }
+
+    fn forward_distance(previous: usize, current: usize, height: usize) -> usize {
+        if current >= previous {
+            current - previous
+        } else {
+            height - previous + current
+        }
     }
 }
