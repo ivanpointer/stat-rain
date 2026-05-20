@@ -20,7 +20,7 @@ impl Default for AppConfig {
         );
         mappings.insert(
             VisualAttribute::Density,
-            MappingExpression::new("memory.normalized * 0.5 + 0.2").unwrap(),
+            MappingExpression::new("memory.normalized * 0.25 + 0.5").unwrap(),
         );
         mappings.insert(
             VisualAttribute::ColorHotness,
@@ -191,5 +191,16 @@ mod tests {
         let state = config.evaluate_effect_state(&metrics).unwrap();
 
         assert_eq!(state.speed, 0.35);
+    }
+
+    #[test]
+    fn default_density_mapping_has_fuller_baseline() {
+        let config = AppConfig::default();
+        let mut metrics = MetricRegistry::default();
+        metrics.set("memory", MetricValue::new(None, Some(0.0)));
+
+        let state = config.evaluate_effect_state(&metrics).unwrap();
+
+        assert_eq!(state.density, 0.5);
     }
 }

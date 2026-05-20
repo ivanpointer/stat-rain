@@ -160,7 +160,13 @@ impl RainEngine {
                 };
                 let trail = (1.0 - distance as f64 / fade_length).clamp(0.0, 1.0);
                 let column_enabled = density >= self.column_noise(x);
-                let brightness = if column_enabled { trail } else { 0.0 } * state.brightness;
+                let rain_brightness = if column_enabled { trail } else { 0.0 } * state.brightness;
+                let ambient_brightness = if rain_brightness == 0.0 && density > 0.0 {
+                    self.ambient_brightness(x, y, state.brightness)
+                } else {
+                    0.0
+                };
+                let brightness = rain_brightness.max(ambient_brightness);
                 let brightness_bucket = bucket(brightness);
                 let head_brightness_bucket = if column_enabled && distance == 0 {
                     bucket(state.brightness)
@@ -170,7 +176,8 @@ impl RainEngine {
                 let glyph = if brightness_bucket == 0 {
                     ' '
                 } else {
-                    let local_churn = (glyph_churn + trail * 0.75).clamp(0.0, 1.0);
+                    let local_churn =
+                        (glyph_churn + trail * 0.75 + ambient_brightness).clamp(0.0, 1.0);
                     self.glyph_for(x, y, local_churn, state.glyph_set)
                 };
 
@@ -218,6 +225,24 @@ impl RainEngine {
             as usize
             % glyphs.len();
         glyphs[index]
+    }
+
+    fn ambient_brightness(&self, x: usize, y: usize, brightness: f64) -> f64 {
+        let hash = self.cell_hash(x, y);
+        let phase = (self.tick.wrapping_add(hash & 0x3f)) & 0x3f;
+        let intensity = match phase {
+            0 => 0.34,
+            1 => 0.22,
+            2 => 0.12,
+            _ => 0.0,
+        };
+        intensity * brightness
+    }
+
+    fn cell_hash(&self, x: usize, y: usize) -> u64 {
+        self.columns[x].seed
+            ^ (x as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ (y as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9)
     }
 }
 
@@ -297,6 +322,28 @@ mod tests {
         let frame = engine.step(state);
 
         assert!(frame.cells.iter().all(|cell| cell.glyph == ' '));
+    }
+
+    #[test]
+    fn active_rain_includes_stationary_pop_glyphs_outside_trails() {
+        let mut engine = RainEngine::new(24, 12, 7);
+        let state = EffectState {
+            density: 1.0,
+            fade_length: 1.0,
+            brightness: 1.0,
+            speed: 0.0,
+            ..EffectState::default()
+        };
+
+        let frame = engine.step(state);
+        let pop_glyphs = frame
+            .cells
+            .iter()
+            .filter(|cell| cell.brightness_bucket > 0 && cell.head_brightness_bucket == 0)
+            .count();
+
+        assert!(pop_glyphs > 0);
+        assert!(pop_glyphs < frame.cells.len() / 5);
     }
 
     #[test]
