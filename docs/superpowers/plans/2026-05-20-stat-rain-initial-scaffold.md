@@ -85,7 +85,6 @@ Create `devbox.json`:
     "cargo-nextest@latest",
     "cargo-criterion@latest",
     "hyperfine@latest",
-    "valgrind@latest",
     "gnumake@latest"
   ],
   "shell": {

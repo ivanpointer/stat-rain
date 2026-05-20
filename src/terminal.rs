@@ -20,7 +20,11 @@ pub struct TerminalCapabilities {
 }
 
 impl TerminalCapabilities {
-    pub fn detect_from_env(term: Option<&str>, colorterm: Option<&str>, tmux: Option<&str>) -> Self {
+    pub fn detect_from_env(
+        term: Option<&str>,
+        colorterm: Option<&str>,
+        tmux: Option<&str>,
+    ) -> Self {
         let color_mode = match (colorterm, term) {
             (Some(value), _)
                 if value.eq_ignore_ascii_case("truecolor")

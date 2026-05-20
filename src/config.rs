@@ -102,7 +102,11 @@ mod tests {
 
         assert_eq!(config.active_profile, "default");
         assert_eq!(
-            config.mappings.get(&VisualAttribute::Speed).unwrap().as_str(),
+            config
+                .mappings
+                .get(&VisualAttribute::Speed)
+                .unwrap()
+                .as_str(),
             "cpu.normalized * 2"
         );
         assert_eq!(
