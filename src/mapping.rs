@@ -14,6 +14,10 @@ pub enum VisualAttribute {
     FadeLength,
     GlyphChurn,
     MessageRevealIntensity,
+    EmberDensity,
+    EmberBrightness,
+    EmberColorHotness,
+    EmberFadeLength,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +74,10 @@ impl FromStr for VisualAttribute {
             "fade_length" => Ok(Self::FadeLength),
             "glyph_churn" => Ok(Self::GlyphChurn),
             "message_reveal_intensity" => Ok(Self::MessageRevealIntensity),
+            "ember_density" => Ok(Self::EmberDensity),
+            "ember_brightness" => Ok(Self::EmberBrightness),
+            "ember_color_hotness" => Ok(Self::EmberColorHotness),
+            "ember_fade_length" => Ok(Self::EmberFadeLength),
             _ => Err(format!("unknown visual attribute: {value}")),
         }
     }

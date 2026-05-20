@@ -7,6 +7,10 @@ pub struct EffectState {
     pub fade_length: f64,
     pub glyph_churn: f64,
     pub message_reveal_intensity: f64,
+    pub ember_density: f64,
+    pub ember_brightness: f64,
+    pub ember_color_hotness: f64,
+    pub ember_fade_length: f64,
     pub glyph_set: GlyphSet,
 }
 
@@ -73,6 +77,14 @@ impl EffectSmoother {
                 target.message_reveal_intensity,
                 factor,
             ),
+            ember_density: lerp(start.ember_density, target.ember_density, factor),
+            ember_brightness: lerp(start.ember_brightness, target.ember_brightness, factor),
+            ember_color_hotness: lerp(
+                start.ember_color_hotness,
+                target.ember_color_hotness,
+                factor,
+            ),
+            ember_fade_length: lerp(start.ember_fade_length, target.ember_fade_length, factor),
             glyph_set: target.glyph_set,
         };
         self.current = Some(smoothed);
@@ -94,6 +106,10 @@ impl Default for EffectState {
             fade_length: 8.0,
             glyph_churn: 0.25,
             message_reveal_intensity: 0.0,
+            ember_density: 0.25,
+            ember_brightness: 0.9,
+            ember_color_hotness: 0.0,
+            ember_fade_length: 7.0,
             glyph_set: GlyphSet::Unicode,
         }
     }
@@ -105,6 +121,8 @@ pub struct RenderCell {
     pub color_hotness_bucket: u8,
     pub brightness_bucket: u8,
     pub head_brightness_bucket: u8,
+    pub ember_brightness_bucket: u8,
+    pub ember_color_hotness_bucket: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,12 +179,18 @@ impl RainEngine {
                 let trail = (1.0 - distance as f64 / fade_length).clamp(0.0, 1.0);
                 let column_enabled = density >= self.column_noise(x);
                 let rain_brightness = if column_enabled { trail } else { 0.0 } * state.brightness;
-                let ambient_brightness = if rain_brightness == 0.0 && density > 0.0 {
-                    self.ambient_brightness(x, y, state.brightness)
+                let ember_brightness = if rain_brightness == 0.0 && state.ember_density > 0.0 {
+                    self.ember_brightness(
+                        x,
+                        y,
+                        state.ember_density,
+                        state.ember_brightness,
+                        state.ember_fade_length,
+                    )
                 } else {
                     0.0
                 };
-                let brightness = rain_brightness.max(ambient_brightness);
+                let brightness = rain_brightness.max(ember_brightness);
                 let brightness_bucket = bucket(brightness);
                 let head_brightness_bucket = if column_enabled && distance == 0 {
                     bucket(state.brightness)
@@ -177,7 +201,7 @@ impl RainEngine {
                     ' '
                 } else {
                     let local_churn =
-                        (glyph_churn + trail * 0.75 + ambient_brightness).clamp(0.0, 1.0);
+                        (glyph_churn + trail * 0.75 + ember_brightness).clamp(0.0, 1.0);
                     self.glyph_for(x, y, local_churn, state.glyph_set)
                 };
 
@@ -186,6 +210,8 @@ impl RainEngine {
                     color_hotness_bucket: hotness,
                     brightness_bucket,
                     head_brightness_bucket,
+                    ember_brightness_bucket: bucket(ember_brightness),
+                    ember_color_hotness_bucket: bucket(state.ember_color_hotness),
                 });
             }
         }
@@ -227,18 +253,23 @@ impl RainEngine {
         glyphs[index]
     }
 
-    fn ambient_brightness(&self, x: usize, y: usize, brightness: f64) -> f64 {
+    fn ember_brightness(
+        &self,
+        x: usize,
+        y: usize,
+        density: f64,
+        brightness: f64,
+        fade_length: f64,
+    ) -> f64 {
         let hash = self.cell_hash(x, y);
-        let phase = (self.tick.wrapping_add(hash & 0x1f)) & 0x1f;
-        let intensity = match phase {
-            0 => 0.58,
-            1 => 0.42,
-            2 => 0.28,
-            3 => 0.16,
-            4 => 0.08,
-            _ => 0.0,
-        };
-        intensity * brightness
+        let period = ember_period(density);
+        let event_tick = hash % period;
+        let age = self.tick.wrapping_sub(event_tick) % period;
+        if age as f64 >= fade_length.max(1.0) {
+            return 0.0;
+        }
+        let fade = 1.0 - age as f64 / fade_length.max(1.0);
+        fade * brightness.clamp(0.0, 1.0)
     }
 
     fn cell_hash(&self, x: usize, y: usize) -> u64 {
@@ -246,6 +277,11 @@ impl RainEngine {
             ^ (x as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
             ^ (y as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9)
     }
+}
+
+fn ember_period(density: f64) -> u64 {
+    let density = density.clamp(0.0, 1.0);
+    (512.0 - density * 448.0).round().max(16.0) as u64
 }
 
 #[derive(Debug, Clone)]
@@ -341,12 +377,37 @@ mod tests {
         let pop_glyphs = frame
             .cells
             .iter()
-            .filter(|cell| cell.brightness_bucket > 0 && cell.head_brightness_bucket == 0)
+            .filter(|cell| cell.ember_brightness_bucket > 0)
             .count();
 
         assert!(pop_glyphs > 0);
-        assert!(pop_glyphs >= frame.cells.len() / 16);
-        assert!(pop_glyphs < frame.cells.len() / 3);
+        assert!(pop_glyphs < frame.cells.len() / 12);
+    }
+
+    #[test]
+    fn stationary_pop_glyphs_do_not_form_row_bands() {
+        let mut engine = RainEngine::new(40, 12, 7);
+        let state = EffectState {
+            density: 1.0,
+            fade_length: 1.0,
+            brightness: 1.0,
+            speed: 0.0,
+            ..EffectState::default()
+        };
+
+        let frame = engine.step(state);
+        let max_row_pop_glyphs = frame
+            .cells
+            .chunks(frame.width)
+            .map(|row| {
+                row.iter()
+                    .filter(|cell| cell.ember_brightness_bucket > 0)
+                    .count()
+            })
+            .max()
+            .unwrap();
+
+        assert!(max_row_pop_glyphs <= 4);
     }
 
     #[test]

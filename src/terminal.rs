@@ -226,10 +226,23 @@ fn truecolor_rgb(cell: &RenderCell) -> (u8, u8, u8) {
         return (scale_channel(head, 220), head, scale_channel(head, 220));
     }
 
+    if cell.ember_brightness_bucket > 0 {
+        return ember_rgb(cell);
+    }
+
     let green = cell.brightness_bucket;
     let hot = cell.color_hotness_bucket;
     let red = scale_channel(hot, 180);
     let blue = green / 10;
+    (red, green, blue)
+}
+
+fn ember_rgb(cell: &RenderCell) -> (u8, u8, u8) {
+    let ember = cell.ember_brightness_bucket;
+    let hot = cell.ember_color_hotness_bucket;
+    let red = ember.saturating_add(scale_channel(hot, 107));
+    let green = ember.saturating_add(scale_channel(hot, 29));
+    let blue = ember.saturating_sub(scale_channel(hot, 74));
     (red, green, blue)
 }
 
@@ -283,12 +296,16 @@ mod tests {
                     color_hotness_bucket: 0,
                     brightness_bucket: 255,
                     head_brightness_bucket: 0,
+                    ember_brightness_bucket: 0,
+                    ember_color_hotness_bucket: 0,
                 },
                 RenderCell {
                     glyph: '1',
                     color_hotness_bucket: 255,
                     brightness_bucket: 128,
                     head_brightness_bucket: 0,
+                    ember_brightness_bucket: 0,
+                    ember_color_hotness_bucket: 0,
                 },
             ],
         };
@@ -314,12 +331,16 @@ mod tests {
                     color_hotness_bucket: 0,
                     brightness_bucket: 255,
                     head_brightness_bucket: 0,
+                    ember_brightness_bucket: 0,
+                    ember_color_hotness_bucket: 0,
                 },
                 RenderCell {
                     glyph: '1',
                     color_hotness_bucket: 0,
                     brightness_bucket: 255,
                     head_brightness_bucket: 0,
+                    ember_brightness_bucket: 0,
+                    ember_color_hotness_bucket: 0,
                 },
             ],
         };
@@ -343,6 +364,8 @@ mod tests {
                 color_hotness_bucket: 0,
                 brightness_bucket: 180,
                 head_brightness_bucket: 255,
+                ember_brightness_bucket: 0,
+                ember_color_hotness_bucket: 0,
             }],
         };
         let mut output = Vec::new();
@@ -364,6 +387,8 @@ mod tests {
                 color_hotness_bucket: 0,
                 brightness_bucket: 180,
                 head_brightness_bucket: 0,
+                ember_brightness_bucket: 0,
+                ember_color_hotness_bucket: 0,
             }],
         };
         let mut output = Vec::new();
@@ -373,6 +398,52 @@ mod tests {
         assert!(String::from_utf8(output)
             .unwrap()
             .contains("\x1b[38;2;0;180;18m"));
+    }
+
+    #[test]
+    fn truecolor_renders_ember_as_white() {
+        let frame = Frame {
+            width: 1,
+            height: 1,
+            cells: vec![RenderCell {
+                glyph: '0',
+                color_hotness_bucket: 0,
+                brightness_bucket: 148,
+                head_brightness_bucket: 0,
+                ember_brightness_bucket: 148,
+                ember_color_hotness_bucket: 0,
+            }],
+        };
+        let mut output = Vec::new();
+
+        write_frame(&mut output, &frame, ColorMode::TrueColor).unwrap();
+
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("\x1b[38;2;148;148;148m"));
+    }
+
+    #[test]
+    fn truecolor_tints_hot_ember_toward_amber() {
+        let frame = Frame {
+            width: 1,
+            height: 1,
+            cells: vec![RenderCell {
+                glyph: '0',
+                color_hotness_bucket: 255,
+                brightness_bucket: 148,
+                head_brightness_bucket: 0,
+                ember_brightness_bucket: 148,
+                ember_color_hotness_bucket: 255,
+            }],
+        };
+        let mut output = Vec::new();
+
+        write_frame(&mut output, &frame, ColorMode::TrueColor).unwrap();
+
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("\x1b[38;2;255;177;74m"));
     }
 
     #[test]

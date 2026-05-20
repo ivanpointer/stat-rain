@@ -89,6 +89,10 @@ impl AppConfig {
                 VisualAttribute::FadeLength => state.fade_length = value,
                 VisualAttribute::GlyphChurn => state.glyph_churn = value,
                 VisualAttribute::MessageRevealIntensity => state.message_reveal_intensity = value,
+                VisualAttribute::EmberDensity => state.ember_density = value,
+                VisualAttribute::EmberBrightness => state.ember_brightness = value,
+                VisualAttribute::EmberColorHotness => state.ember_color_hotness = value,
+                VisualAttribute::EmberFadeLength => state.ember_fade_length = value,
             }
         }
 
@@ -180,6 +184,32 @@ mod tests {
         assert_eq!(state.speed, 5.0);
         assert_eq!(state.color_hotness, 0.7);
         assert_eq!(state.brightness, 0.75);
+    }
+
+    #[test]
+    fn converts_ember_mappings_to_effect_state() {
+        let config = AppConfig::from_toml_profile(
+            r#"
+            [profiles.default.map]
+            ember_density = "cpu.normalized"
+            ember_brightness = "memory.normalized"
+            ember_color_hotness = "thermal_zone.raw / 100"
+            ember_fade_length = "12"
+            "#,
+            "default",
+        )
+        .unwrap();
+        let mut metrics = MetricRegistry::default();
+        metrics.set("cpu", MetricValue::new(None, Some(0.4)));
+        metrics.set("memory", MetricValue::new(None, Some(0.7)));
+        metrics.set("thermal_zone", MetricValue::new(Some(65.0), None));
+
+        let state = config.evaluate_effect_state(&metrics).unwrap();
+
+        assert_eq!(state.ember_density, 0.4);
+        assert_eq!(state.ember_brightness, 0.7);
+        assert_eq!(state.ember_color_hotness, 0.65);
+        assert_eq!(state.ember_fade_length, 12.0);
     }
 
     #[test]
