@@ -143,6 +143,7 @@ pub struct MessageOverlay {
     pub stay: u64,
     pub fade_out: u64,
     pub class: MessageClass,
+    washed_slots: Vec<bool>,
     seed: u64,
 }
 
@@ -155,6 +156,7 @@ pub struct MessageTiming {
 
 impl MessageOverlay {
     pub fn new(text: String, fade_in: u64, stay: u64, fade_out: u64, seed: u64) -> Self {
+        let slot_count = text.chars().count();
         Self {
             text,
             age: 0,
@@ -162,6 +164,7 @@ impl MessageOverlay {
             stay,
             fade_out,
             class: MessageClass::Info,
+            washed_slots: vec![false; slot_count],
             seed,
         }
     }
@@ -179,7 +182,7 @@ impl MessageOverlay {
     }
 }
 
-pub fn apply_message_overlay(frame: &mut Frame, message: &MessageOverlay, intensity: f64) {
+pub fn apply_message_overlay(frame: &mut Frame, message: &mut MessageOverlay, intensity: f64) {
     if frame.width == 0 || frame.height == 0 || message.is_expired() {
         return;
     }
@@ -198,8 +201,16 @@ pub fn apply_message_overlay(frame: &mut Frame, message: &MessageOverlay, intens
         }
         let index = row * frame.width + start_x + offset;
         let cell = &mut frame.cells[index];
-        if message_is_washing(message) && !message_cell_can_receive_wash(cell) {
-            continue;
+        if message_is_washing(message) {
+            if message.washed_slots.get(offset).copied().unwrap_or(false) {
+                continue;
+            }
+            if !message_cell_can_receive_wash(cell) {
+                if let Some(washed) = message.washed_slots.get_mut(offset) {
+                    *washed = true;
+                }
+                continue;
+            }
         }
         let char_hash = mix_hash(message.seed ^ (offset as u64).wrapping_mul(0x9e37_79b9));
         let Some((glyph, brightness_bucket)) =
@@ -939,9 +950,9 @@ mod tests {
             height: 5,
             cells: vec![blank_cell(); 60],
         };
-        let message = MessageOverlay::new("ALERT".to_string(), 0, 120, 0, 7);
+        let mut message = MessageOverlay::new("ALERT".to_string(), 0, 120, 0, 7);
 
-        apply_message_overlay(&mut frame, &message, 0.0);
+        apply_message_overlay(&mut frame, &mut message, 0.0);
 
         let rendered = frame
             .cells
@@ -959,9 +970,9 @@ mod tests {
             height: 5,
             cells: vec![blank_cell(); 65],
         };
-        let message = MessageOverlay::new("HEY".to_string(), 0, 120, 0, 7);
+        let mut message = MessageOverlay::new("HEY".to_string(), 0, 120, 0, 7);
 
-        apply_message_overlay(&mut frame, &message, 0.0);
+        apply_message_overlay(&mut frame, &mut message, 0.0);
 
         let message_indices = frame
             .cells
@@ -980,17 +991,17 @@ mod tests {
             cells: vec![blank_cell(); 60],
         };
         let mut stay_frame = early_frame.clone();
-        let early = MessageOverlay {
+        let mut early = MessageOverlay {
             age: 8,
             ..MessageOverlay::new("ALERT".to_string(), 30, 60, 30, 7)
         };
-        let stay = MessageOverlay {
+        let mut stay = MessageOverlay {
             age: 31,
             ..early.clone()
         };
 
-        apply_message_overlay(&mut early_frame, &early, 0.0);
-        apply_message_overlay(&mut stay_frame, &stay, 0.0);
+        apply_message_overlay(&mut early_frame, &mut early, 0.0);
+        apply_message_overlay(&mut stay_frame, &mut stay, 0.0);
 
         let early_rendered = rendered_message_chars(&early_frame);
         let stay_rendered = rendered_message_chars(&stay_frame);
@@ -1006,12 +1017,12 @@ mod tests {
             height: 5,
             cells: vec![blank_cell(); 60],
         };
-        let message = MessageOverlay {
+        let mut message = MessageOverlay {
             age: 61,
             ..MessageOverlay::new("ALERT".to_string(), 0, 60, 60, 7)
         };
 
-        apply_message_overlay(&mut frame, &message, 0.0);
+        apply_message_overlay(&mut frame, &mut message, 0.0);
 
         assert_eq!(rendered_message_chars(&frame), "ALERT");
     }
@@ -1033,16 +1044,45 @@ mod tests {
             ember_brightness_bucket: 0,
             ember_color_hotness_bucket: 0,
         };
-        let message = MessageOverlay {
+        let mut message = MessageOverlay {
             age: 61,
             ..MessageOverlay::new("ALERT".to_string(), 0, 60, 60, 7)
         };
 
-        apply_message_overlay(&mut frame, &message, 0.0);
+        apply_message_overlay(&mut frame, &mut message, 0.0);
 
         assert_eq!(frame.cells[rain_index].glyph, '9');
         assert_eq!(frame.cells[rain_index].message_color_bucket, 0);
         assert_eq!(rendered_message_chars(&frame), "AERT");
+    }
+
+    #[test]
+    fn message_overlay_wash_phase_keeps_overwritten_letters_gone() {
+        let mut rainy_frame = Frame {
+            width: 12,
+            height: 5,
+            cells: vec![blank_cell(); 60],
+        };
+        let mut later_blank_frame = rainy_frame.clone();
+        let rain_index = 2 * 12 + 4;
+        rainy_frame.cells[rain_index] = RenderCell {
+            glyph: '9',
+            color_hotness_bucket: 0,
+            message_color_bucket: 0,
+            brightness_bucket: 180,
+            head_brightness_bucket: 0,
+            ember_brightness_bucket: 0,
+            ember_color_hotness_bucket: 0,
+        };
+        let mut message = MessageOverlay {
+            age: 61,
+            ..MessageOverlay::new("ALERT".to_string(), 0, 60, 60, 7)
+        };
+
+        apply_message_overlay(&mut rainy_frame, &mut message, 0.0);
+        apply_message_overlay(&mut later_blank_frame, &mut message, 0.0);
+
+        assert_eq!(rendered_message_chars(&later_blank_frame), "AERT");
     }
 
     #[test]
@@ -1052,12 +1092,12 @@ mod tests {
             height: 5,
             cells: vec![blank_cell(); 60],
         };
-        let message = MessageOverlay {
+        let mut message = MessageOverlay {
             age: 120,
             ..MessageOverlay::new("ALERT".to_string(), 0, 60, 60, 7)
         };
 
-        apply_message_overlay(&mut frame, &message, 0.0);
+        apply_message_overlay(&mut frame, &mut message, 0.0);
 
         assert_eq!(rendered_message_chars(&frame), "");
     }
@@ -1069,12 +1109,12 @@ mod tests {
             height: 5,
             cells: vec![blank_cell(); 60],
         };
-        let message = MessageOverlay {
+        let mut message = MessageOverlay {
             class: MessageClass::Error,
             ..MessageOverlay::new("ALERT".to_string(), 0, 120, 0, 7)
         };
 
-        apply_message_overlay(&mut frame, &message, 0.0);
+        apply_message_overlay(&mut frame, &mut message, 0.0);
 
         let message_colors = frame
             .cells
