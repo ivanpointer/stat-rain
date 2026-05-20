@@ -175,7 +175,7 @@ impl MessageOverlay {
     }
 
     fn lifetime(&self) -> u64 {
-        self.fade_in + self.stay + self.fade_out.max(1) + self.fade_out / 2 + self.fade_out / 5
+        self.fade_in + self.stay + self.fade_out
     }
 }
 
@@ -196,20 +196,20 @@ pub fn apply_message_overlay(frame: &mut Frame, message: &MessageOverlay, intens
         if glyph == ' ' {
             continue;
         }
+        let index = row * frame.width + start_x + offset;
+        let cell = &mut frame.cells[index];
+        if message_is_washing(message) && !message_cell_can_receive_wash(cell) {
+            continue;
+        }
         let char_hash = mix_hash(message.seed ^ (offset as u64).wrapping_mul(0x9e37_79b9));
         let Some((glyph, brightness_bucket)) =
             message_glyph_and_brightness(message, offset, glyph, char_hash, intensity)
         else {
             continue;
         };
-        let index = row * frame.width + start_x + offset;
-        let cell = &mut frame.cells[index];
         cell.glyph = glyph;
         cell.brightness_bucket = cell.brightness_bucket.max(brightness_bucket);
         cell.head_brightness_bucket = cell.head_brightness_bucket.max(brightness_bucket);
-        cell.color_hotness_bucket = cell
-            .color_hotness_bucket
-            .max(message.class.color_hotness_bucket());
         cell.message_color_bucket = message.class.color_bucket();
         cell.ember_brightness_bucket = 0;
     }
@@ -246,51 +246,22 @@ fn message_glyph_and_brightness(
         return Some((target, bucket(max_brightness)));
     }
 
-    let fade_delay = message_fade_delay(message.fade_out, char_hash);
-    let fade_age = message.age.saturating_sub(stay_end);
-    if fade_age < fade_delay {
+    if message.age < message.lifetime() {
         return Some((target, bucket(max_brightness)));
     }
-    let fade_age = fade_age - fade_delay;
-    let fade_length = jittered_message_fade(message.fade_out, char_hash);
-    if fade_age >= fade_length {
-        return None;
-    }
-    let brightness = (1.0 - fade_age as f64 / fade_length as f64) * max_brightness;
-    let progress = fade_age as f64 / fade_length as f64;
-    let glyph = if message_should_glitch(
-        offset,
-        message.age,
-        char_hash,
-        progress,
-        message.class.glitch_boost(),
-    ) {
-        message_noise_glyph(offset, message.age, char_hash)
-    } else {
-        target
-    };
-    Some((glyph, bucket(brightness)))
+
+    None
 }
 
-fn jittered_message_fade(base: u64, hash: u64) -> u64 {
-    let base = base.max(1);
-    base + (mix_hash(hash) % (base / 2 + 1))
+fn message_is_washing(message: &MessageOverlay) -> bool {
+    message.age >= message.fade_in + message.stay
 }
 
-fn message_fade_delay(base: u64, hash: u64) -> u64 {
-    if base <= 1 {
-        return 0;
-    }
-    mix_hash(hash ^ 0xfeed_fade) % (base / 5 + 1)
-}
-
-fn message_should_glitch(offset: usize, age: u64, hash: u64, progress: f64, boost: f64) -> bool {
-    if progress < 0.15 {
-        return false;
-    }
-    let roll = mix_hash(hash ^ age.wrapping_mul(17) ^ (offset as u64).wrapping_mul(31)) % 100;
-    let threshold = ((18.0 + progress.clamp(0.0, 1.0) * 55.0) * boost).min(96.0) as u64;
-    roll < threshold
+fn message_cell_can_receive_wash(cell: &RenderCell) -> bool {
+    cell.glyph == ' '
+        && cell.brightness_bucket == 0
+        && cell.head_brightness_bucket == 0
+        && cell.ember_brightness_bucket == 0
 }
 
 fn message_noise_glyph(offset: usize, age: u64, hash: u64) -> char {
@@ -1029,77 +1000,70 @@ mod tests {
     }
 
     #[test]
-    fn message_overlay_fades_out_with_per_character_jitter() {
+    fn message_overlay_wash_phase_keeps_message_on_blank_cells() {
         let mut frame = Frame {
             width: 12,
             height: 5,
             cells: vec![blank_cell(); 60],
         };
         let message = MessageOverlay {
-            age: 105,
+            age: 61,
             ..MessageOverlay::new("ALERT".to_string(), 0, 60, 60, 7)
         };
 
         apply_message_overlay(&mut frame, &message, 0.0);
 
-        let brightnesses = frame
-            .cells
-            .iter()
-            .filter(|cell| cell.head_brightness_bucket > 0)
-            .map(|cell| cell.head_brightness_bucket)
-            .collect::<Vec<_>>();
-        assert!(brightnesses.len() > 1);
-        assert!(brightnesses.iter().min() != brightnesses.iter().max());
+        assert_eq!(rendered_message_chars(&frame), "ALERT");
     }
 
     #[test]
-    fn message_overlay_staggers_fade_out_start_by_character() {
+    fn message_overlay_wash_phase_lets_rain_overwrite_message_cells() {
         let mut frame = Frame {
             width: 12,
             height: 5,
             cells: vec![blank_cell(); 60],
         };
+        let rain_index = 2 * 12 + 4;
+        frame.cells[rain_index] = RenderCell {
+            glyph: '9',
+            color_hotness_bucket: 0,
+            message_color_bucket: 0,
+            brightness_bucket: 180,
+            head_brightness_bucket: 0,
+            ember_brightness_bucket: 0,
+            ember_color_hotness_bucket: 0,
+        };
         let message = MessageOverlay {
-            age: 68,
+            age: 61,
             ..MessageOverlay::new("ALERT".to_string(), 0, 60, 60, 7)
         };
 
         apply_message_overlay(&mut frame, &message, 0.0);
 
-        let brightnesses = frame
-            .cells
-            .iter()
-            .filter(|cell| cell.head_brightness_bucket > 0)
-            .map(|cell| cell.head_brightness_bucket)
-            .collect::<Vec<_>>();
-        assert!(brightnesses
-            .iter()
-            .any(|brightness| *brightness == bucket(0.72)));
-        assert!(brightnesses
-            .iter()
-            .any(|brightness| *brightness < bucket(0.72)));
+        assert_eq!(frame.cells[rain_index].glyph, '9');
+        assert_eq!(frame.cells[rain_index].message_color_bucket, 0);
+        assert_eq!(rendered_message_chars(&frame), "AERT");
     }
 
     #[test]
-    fn message_overlay_glitches_some_letters_during_fade_out() {
+    fn message_overlay_expires_after_wash_phase() {
         let mut frame = Frame {
             width: 12,
             height: 5,
             cells: vec![blank_cell(); 60],
         };
         let message = MessageOverlay {
-            age: 115,
-            ..MessageOverlay::new("ALERTALERT".to_string(), 0, 60, 60, 7)
+            age: 120,
+            ..MessageOverlay::new("ALERT".to_string(), 0, 60, 60, 7)
         };
 
         apply_message_overlay(&mut frame, &message, 0.0);
 
-        let rendered = rendered_message_chars(&frame);
-        assert_ne!(rendered, "ALERTALERT");
+        assert_eq!(rendered_message_chars(&frame), "");
     }
 
     #[test]
-    fn message_overlay_applies_class_hotness() {
+    fn message_overlay_applies_class_color() {
         let mut frame = Frame {
             width: 12,
             height: 5,
@@ -1112,13 +1076,6 @@ mod tests {
 
         apply_message_overlay(&mut frame, &message, 0.0);
 
-        let hotnesses = frame
-            .cells
-            .iter()
-            .filter(|cell| cell.head_brightness_bucket > 0)
-            .map(|cell| cell.color_hotness_bucket)
-            .collect::<Vec<_>>();
-        assert_eq!(hotnesses, vec![255, 255, 255, 255, 255]);
         let message_colors = frame
             .cells
             .iter()
@@ -1126,24 +1083,6 @@ mod tests {
             .map(|cell| cell.message_color_bucket)
             .collect::<Vec<_>>();
         assert_eq!(message_colors, vec![4, 4, 4, 4, 4]);
-    }
-
-    #[test]
-    fn error_message_glitches_more_than_info_during_fade_out() {
-        let info = MessageOverlay {
-            age: 95,
-            class: MessageClass::Info,
-            ..MessageOverlay::new("ALERTALERTALERT".to_string(), 0, 60, 60, 7)
-        };
-        let error = MessageOverlay {
-            class: MessageClass::Error,
-            ..info.clone()
-        };
-
-        assert!(
-            fade_out_glitch_count(&error) > fade_out_glitch_count(&info),
-            "error messages should glitch more aggressively than info messages"
-        );
     }
 
     #[test]
@@ -1338,22 +1277,5 @@ mod tests {
             .filter(|cell| cell.head_brightness_bucket > 0)
             .map(|cell| cell.glyph)
             .collect()
-    }
-
-    fn fade_out_glitch_count(message: &MessageOverlay) -> usize {
-        message
-            .text
-            .chars()
-            .enumerate()
-            .filter(|(offset, target)| {
-                let char_hash = mix_hash(message.seed ^ (*offset as u64).wrapping_mul(0x9e37_79b9));
-                let Some((glyph, _)) =
-                    message_glyph_and_brightness(message, *offset, *target, char_hash, 0.0)
-                else {
-                    return false;
-                };
-                glyph != *target
-            })
-            .count()
     }
 }

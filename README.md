@@ -66,11 +66,11 @@ cargo run -- send --socket /tmp/stat-rain.sock --message "BUILD FAILED" --class 
 The pushed `cpu` metric also updates `cpu.total`, and external values stay
 authoritative over built-in CPU samples until another value is pushed.
 Pushed messages render centered as a short-lived bright overlay. Characters
-resolve in randomized order during fade-in, hold stable, then fade with
-per-character jitter. Message classes render with explicit status colors:
-`info` is blue, `success` is green, `warning` is yellow, and `error` is red.
-Class changes also tune brightness and fade-out glitch intensity while
-preserving the same message lifecycle.
+resolve in randomized order during fade-in, hold stable, then wash away as rain
+and embers overwrite the message cells. Message classes render with explicit
+status colors: `info` is blue, `success` is green, `warning` is yellow, and
+`error` is red. Class changes also tune brightness while preserving the same
+message lifecycle.
 
 The Make helpers accept the same classes:
 

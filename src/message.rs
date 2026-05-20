@@ -31,30 +31,12 @@ impl MessageClass {
         }
     }
 
-    pub fn color_hotness_bucket(self) -> u8 {
-        match self {
-            Self::Info => 0,
-            Self::Success => 0,
-            Self::Warning => 190,
-            Self::Error => 255,
-        }
-    }
-
     pub fn brightness_floor(self) -> f64 {
         match self {
             Self::Info => 0.72,
             Self::Success => 0.76,
             Self::Warning => 0.82,
             Self::Error => 0.88,
-        }
-    }
-
-    pub fn glitch_boost(self) -> f64 {
-        match self {
-            Self::Info => 1.0,
-            Self::Success => 0.85,
-            Self::Warning => 1.25,
-            Self::Error => 1.55,
         }
     }
 
