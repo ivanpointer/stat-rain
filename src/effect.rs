@@ -140,14 +140,37 @@ pub struct RainEngine {
     columns: Vec<ColumnState>,
 }
 
+const RAIN_TRACES_PER_COLUMN: usize = 3;
+
 impl RainEngine {
     pub fn new(width: usize, height: usize, seed: u64) -> Self {
         let mut rng = Lcg::new(seed);
         let columns = (0..width)
-            .map(|_| ColumnState {
-                phase: rng.next_usize(height.max(1)) as f64,
-                speed_scale: 0.65 + rng.next_usize(70) as f64 / 100.0,
-                seed: rng.next(),
+            .map(|_| {
+                let seed = rng.next();
+                ColumnState {
+                    seed,
+                    traces: [
+                        TraceState {
+                            phase: rng.next_usize(height.max(1)) as f64,
+                            speed_scale: 0.65 + rng.next_usize(70) as f64 / 100.0,
+                            density_scale: 1.0,
+                            seed: rng.next(),
+                        },
+                        TraceState {
+                            phase: rng.next_usize(height.max(1)) as f64,
+                            speed_scale: 0.95 + rng.next_usize(90) as f64 / 100.0,
+                            density_scale: 0.35,
+                            seed: rng.next(),
+                        },
+                        TraceState {
+                            phase: rng.next_usize(height.max(1)) as f64,
+                            speed_scale: 0.45 + rng.next_usize(120) as f64 / 100.0,
+                            density_scale: 0.18,
+                            seed: rng.next(),
+                        },
+                    ],
+                }
             })
             .collect::<Vec<_>>();
 
@@ -170,15 +193,27 @@ impl RainEngine {
         for y in 0..self.height {
             for x in 0..self.width {
                 let column = &self.columns[x];
-                let head = column.phase as usize % self.height.max(1);
-                let distance = if y <= head {
-                    head - y
-                } else {
-                    self.height + head - y
-                };
-                let trail = (1.0 - distance as f64 / fade_length).clamp(0.0, 1.0);
-                let column_enabled = density >= self.column_noise(x);
-                let rain_brightness = if column_enabled { trail } else { 0.0 } * state.brightness;
+                let mut best_trail = 0.0;
+                let mut rain_head = false;
+                for trace in &column.traces {
+                    if density * trace.density_scale < self.trace_noise(x, trace) {
+                        continue;
+                    }
+                    let head = trace.phase as usize % self.height.max(1);
+                    let distance = if y <= head {
+                        head - y
+                    } else {
+                        self.height + head - y
+                    };
+                    let trail = (1.0 - distance as f64 / fade_length).clamp(0.0, 1.0);
+                    if distance == 0 {
+                        rain_head = true;
+                    }
+                    if trail > best_trail {
+                        best_trail = trail;
+                    }
+                }
+                let rain_brightness = best_trail * state.brightness;
                 let ember_brightness = if rain_brightness == 0.0 && state.ember_density > 0.0 {
                     self.ember_brightness(
                         x,
@@ -192,7 +227,7 @@ impl RainEngine {
                 };
                 let brightness = rain_brightness.max(ember_brightness);
                 let brightness_bucket = bucket(brightness);
-                let head_brightness_bucket = if column_enabled && distance == 0 {
+                let head_brightness_bucket = if rain_head {
                     bucket(state.brightness)
                 } else {
                     0
@@ -203,7 +238,7 @@ impl RainEngine {
                     self.ember_glyph_for(x, y, state.ember_density, state.glyph_set)
                 } else {
                     let local_churn =
-                        (glyph_churn + trail * 0.75 + ember_brightness).clamp(0.0, 1.0);
+                        (glyph_churn + best_trail * 0.75 + ember_brightness).clamp(0.0, 1.0);
                     self.glyph_for(x, y, local_churn, state.glyph_set)
                 };
 
@@ -220,7 +255,9 @@ impl RainEngine {
 
         self.tick = self.tick.wrapping_add(1);
         for column in &mut self.columns {
-            column.phase = (column.phase + speed * column.speed_scale) % self.height.max(1) as f64;
+            for trace in &mut column.traces {
+                trace.phase = (trace.phase + speed * trace.speed_scale) % self.height.max(1) as f64;
+            }
         }
 
         Frame {
@@ -230,8 +267,8 @@ impl RainEngine {
         }
     }
 
-    fn column_noise(&self, x: usize) -> f64 {
-        (((x as u64 * 1_103_515_245 + self.columns[x].seed) >> 16) & 0xff) as f64 / 255.0
+    fn trace_noise(&self, x: usize, trace: &TraceState) -> f64 {
+        (((x as u64 * 1_103_515_245 + trace.seed) >> 16) & 0xff) as f64 / 255.0
     }
 
     fn glyph_for(&self, x: usize, y: usize, glyph_churn: f64, glyph_set: GlyphSet) -> char {
@@ -329,8 +366,15 @@ fn mix_hash(value: u64) -> u64 {
 
 #[derive(Debug, Clone)]
 struct ColumnState {
+    seed: u64,
+    traces: [TraceState; RAIN_TRACES_PER_COLUMN],
+}
+
+#[derive(Debug, Clone)]
+struct TraceState {
     phase: f64,
     speed_scale: f64,
+    density_scale: f64,
     seed: u64,
 }
 
@@ -458,6 +502,26 @@ mod tests {
     }
 
     #[test]
+    fn rain_allows_multiple_drops_in_one_column() {
+        let mut engine = RainEngine::new(1, 24, 7);
+        let state = EffectState {
+            density: 1.0,
+            ember_density: 0.0,
+            speed: 0.0,
+            ..EffectState::default()
+        };
+
+        let frame = engine.step(state);
+        let head_cells = frame
+            .cells
+            .iter()
+            .filter(|cell| cell.head_brightness_bucket > 0)
+            .count();
+
+        assert!(head_cells > 1);
+    }
+
+    #[test]
     fn about_half_of_ember_glyphs_never_change_during_full_fade_window() {
         let mut engine = RainEngine::new(120, 40, 7);
         let state = EffectState {
@@ -576,7 +640,7 @@ mod tests {
             .filter(|cell| cell.brightness_bucket > 0 && cell.head_brightness_bucket == 0)
             .count();
 
-        assert_eq!(head_cells, 1);
+        assert!(head_cells >= 1);
         assert!(trail_cells > 0);
     }
 
