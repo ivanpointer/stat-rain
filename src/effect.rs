@@ -229,11 +229,13 @@ impl RainEngine {
 
     fn ambient_brightness(&self, x: usize, y: usize, brightness: f64) -> f64 {
         let hash = self.cell_hash(x, y);
-        let phase = (self.tick.wrapping_add(hash & 0x3f)) & 0x3f;
+        let phase = (self.tick.wrapping_add(hash & 0x1f)) & 0x1f;
         let intensity = match phase {
-            0 => 0.34,
-            1 => 0.22,
-            2 => 0.12,
+            0 => 0.58,
+            1 => 0.42,
+            2 => 0.28,
+            3 => 0.16,
+            4 => 0.08,
             _ => 0.0,
         };
         intensity * brightness
@@ -343,7 +345,8 @@ mod tests {
             .count();
 
         assert!(pop_glyphs > 0);
-        assert!(pop_glyphs < frame.cells.len() / 5);
+        assert!(pop_glyphs >= frame.cells.len() / 16);
+        assert!(pop_glyphs < frame.cells.len() / 3);
     }
 
     #[test]

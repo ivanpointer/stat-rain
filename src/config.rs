@@ -20,7 +20,7 @@ impl Default for AppConfig {
         );
         mappings.insert(
             VisualAttribute::Density,
-            MappingExpression::new("memory.normalized * 0.25 + 0.5").unwrap(),
+            MappingExpression::new("memory.normalized * 0.18 + 0.72").unwrap(),
         );
         mappings.insert(
             VisualAttribute::ColorHotness,
@@ -201,6 +201,6 @@ mod tests {
 
         let state = config.evaluate_effect_state(&metrics).unwrap();
 
-        assert_eq!(state.density, 0.5);
+        assert_eq!(state.density, 0.72);
     }
 }
