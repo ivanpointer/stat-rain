@@ -1,15 +1,16 @@
 use anyhow::Result;
 use stat_rain::cli::{Cli, Command, RunArgs};
 use stat_rain::config::AppConfig;
-use stat_rain::effect::{EffectState, GlyphSet};
-use stat_rain::metrics::{MetricRegistry, MetricValue};
+use stat_rain::effect::GlyphSet;
+use stat_rain::metrics::{MetricProvider, MetricRegistry, MetricValue};
+use stat_rain::system_metrics::BuiltinSystemProvider;
 use stat_rain::terminal::{self, FrameRenderer, TerminalCapabilities, TerminalSize};
 use std::fs;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn main() -> Result<()> {
     let cli = Cli::parse_args();
@@ -32,10 +33,12 @@ fn run(args: RunArgs) -> Result<()> {
 }
 
 pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
-    let mut state = load_effect_state(&args)?;
-    if args.ascii {
-        state.glyph_set = GlyphSet::Ascii;
-    }
+    let config = load_config(&args)?;
+    let mut metrics = initial_metric_registry();
+    let mut provider = BuiltinSystemProvider::new();
+    sample_builtin_metrics(&mut provider, &mut metrics);
+    let metric_interval = Duration::from_millis(args.metric_sample_ms);
+    let mut last_metric_sample = Instant::now();
     let frames = args.frames.unwrap_or(u64::MAX);
     let delay = Duration::from_millis(args.frame_delay_ms);
     let caps = TerminalCapabilities::detect_from_env(
@@ -54,6 +57,14 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
     for _ in 0..frames {
         if interrupted.load(Ordering::Relaxed) {
             break;
+        }
+        if last_metric_sample.elapsed() >= metric_interval {
+            sample_builtin_metrics(&mut provider, &mut metrics);
+            last_metric_sample = Instant::now();
+        }
+        let mut state = config.evaluate_effect_state(&metrics)?;
+        if args.ascii {
+            state.glyph_set = GlyphSet::Ascii;
         }
         let new_size = current_size(&args);
         if should_rebuild_engine(size, new_size) {
@@ -125,7 +136,29 @@ mod tests {
     }
 }
 
-fn load_effect_state(args: &RunArgs) -> Result<EffectState> {
+fn sample_builtin_metrics(provider: &mut impl MetricProvider, metrics: &mut MetricRegistry) {
+    match provider.sample() {
+        Ok(sample) => metrics.apply_sample(sample),
+        Err(_) => {
+            metrics.mark_stale("cpu");
+            metrics.mark_stale("memory");
+        }
+    }
+}
+
+fn initial_metric_registry() -> MetricRegistry {
+    let mut metrics = MetricRegistry::default();
+    metrics.set("cpu", MetricValue::new(Some(0.0), Some(0.0)));
+    metrics.set("memory", MetricValue::new(Some(0.0), Some(0.0)));
+    metrics.set("thermal_zone", MetricValue::new(Some(45.0), Some(0.45)));
+    metrics.set(
+        "external.message_pressure",
+        MetricValue::new(Some(0.0), Some(0.0)),
+    );
+    metrics
+}
+
+fn load_config(args: &RunArgs) -> Result<AppConfig> {
     let profile = args.profile.as_deref().unwrap_or("default");
     let mut config = if let Some(path) = &args.config {
         let input = fs::read_to_string(path)?;
@@ -140,14 +173,5 @@ fn load_effect_state(args: &RunArgs) -> Result<EffectState> {
         config.apply_mapping_override(mapping)?;
     }
 
-    let mut metrics = MetricRegistry::default();
-    metrics.set("cpu", MetricValue::new(Some(0.2), Some(0.2)));
-    metrics.set("memory", MetricValue::new(Some(0.35), Some(0.35)));
-    metrics.set("thermal_zone", MetricValue::new(Some(45.0), Some(0.45)));
-    metrics.set(
-        "external.message_pressure",
-        MetricValue::new(Some(0.0), Some(0.0)),
-    );
-
-    config.evaluate_effect_state(&metrics)
+    Ok(config)
 }

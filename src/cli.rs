@@ -36,6 +36,9 @@ pub struct RunArgs {
     #[arg(long = "frame-delay-ms", default_value_t = 33)]
     pub frame_delay_ms: u64,
 
+    #[arg(long = "metric-sample-ms", default_value_t = 1_000)]
+    pub metric_sample_ms: u64,
+
     #[arg(long)]
     pub width: Option<usize>,
 
