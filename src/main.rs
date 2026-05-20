@@ -1,7 +1,7 @@
 use anyhow::Result;
 use stat_rain::cli::{Cli, Command, RunArgs};
 use stat_rain::config::AppConfig;
-use stat_rain::effect::EffectState;
+use stat_rain::effect::{EffectState, GlyphSet};
 use stat_rain::metrics::{MetricRegistry, MetricValue};
 use stat_rain::terminal::{self, TerminalCapabilities};
 use std::fs;
@@ -30,7 +30,10 @@ fn run(args: RunArgs) -> Result<()> {
 }
 
 pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
-    let state = load_effect_state(&args)?;
+    let mut state = load_effect_state(&args)?;
+    if args.ascii {
+        state.glyph_set = GlyphSet::Ascii;
+    }
     let width = args.width.unwrap_or(80);
     let height = args.height.unwrap_or(24);
     let frames = args.frames.unwrap_or(u64::MAX);

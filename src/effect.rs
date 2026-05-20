@@ -7,6 +7,13 @@ pub struct EffectState {
     pub fade_length: f64,
     pub glyph_churn: f64,
     pub message_reveal_intensity: f64,
+    pub glyph_set: GlyphSet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlyphSet {
+    Unicode,
+    Ascii,
 }
 
 impl Default for EffectState {
@@ -19,6 +26,7 @@ impl Default for EffectState {
             fade_length: 8.0,
             glyph_churn: 0.25,
             message_reveal_intensity: 0.0,
+            glyph_set: GlyphSet::Unicode,
         }
     }
 }
@@ -86,7 +94,7 @@ impl RainEngine {
                 let glyph = if brightness_bucket == 0 {
                     ' '
                 } else {
-                    self.glyph_for(x, y, glyph_churn)
+                    self.glyph_for(x, y, glyph_churn, state.glyph_set)
                 };
 
                 cells.push(RenderCell {
@@ -110,16 +118,24 @@ impl RainEngine {
         (((x as u64 * 1_103_515_245 + self.rng.seed) >> 16) & 0xff) as f64 / 255.0
     }
 
-    fn glyph_for(&self, x: usize, y: usize, glyph_churn: f64) -> char {
-        const GLYPHS: &[char] = &[
+    fn glyph_for(&self, x: usize, y: usize, glyph_churn: f64, glyph_set: GlyphSet) -> char {
+        const UNICODE_GLYPHS: &[char] = &[
             '0', '1', '3', '7', '9', 'a', 'b', 'x', 'z', 'ﾊ', 'ﾐ', 'ﾋ', 'ｰ', 'ｳ', 'ｼ', 'ﾅ', 'ﾓ',
             'ﾆ',
         ];
+        const ASCII_GLYPHS: &[char] = &[
+            '0', '1', '3', '7', '9', 'a', 'b', 'x', 'z', '+', '-', '*', '/', '|', ':', '.', '=',
+            '#',
+        ];
+        let glyphs = match glyph_set {
+            GlyphSet::Unicode => UNICODE_GLYPHS,
+            GlyphSet::Ascii => ASCII_GLYPHS,
+        };
 
         let churn = (glyph_churn * 32.0) as u64;
         let index = (x as u64 * 17 + y as u64 * 31 + self.tick * churn + self.rng.seed) as usize
-            % GLYPHS.len();
-        GLYPHS[index]
+            % glyphs.len();
+        glyphs[index]
     }
 }
 
@@ -191,5 +207,23 @@ mod tests {
         let frame = engine.step(state);
 
         assert!(frame.cells.iter().all(|cell| cell.glyph == ' '));
+    }
+
+    #[test]
+    fn ascii_mode_emits_only_ascii_visible_glyphs() {
+        let mut engine = RainEngine::new(8, 4, 7);
+        let state = EffectState {
+            density: 1.0,
+            glyph_set: GlyphSet::Ascii,
+            ..EffectState::default()
+        };
+
+        let frame = engine.step(state);
+
+        assert!(frame
+            .cells
+            .iter()
+            .filter(|cell| cell.glyph != ' ')
+            .all(|cell| cell.glyph.is_ascii()));
     }
 }
