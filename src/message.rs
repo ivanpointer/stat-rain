@@ -57,6 +57,15 @@ impl MessageClass {
             Self::Error => 1.55,
         }
     }
+
+    pub fn color_bucket(self) -> u8 {
+        match self {
+            Self::Info => 1,
+            Self::Success => 2,
+            Self::Warning => 3,
+            Self::Error => 4,
+        }
+    }
 }
 
 impl Default for MessageClass {

@@ -198,7 +198,9 @@ fn write_color(mut output: impl Write, cell: &RenderCell, color_mode: ColorMode)
             write!(output, "\x1b[38;2;{red};{green};{blue}m")
         }
         ColorMode::Ansi256 => {
-            let color = if cell.color_hotness_bucket > 170 {
+            let color = if cell.message_color_bucket > 0 {
+                ansi256_message_color(cell.message_color_bucket)
+            } else if cell.color_hotness_bucket > 170 {
                 196
             } else if cell.color_hotness_bucket > 84 {
                 226
@@ -208,7 +210,9 @@ fn write_color(mut output: impl Write, cell: &RenderCell, color_mode: ColorMode)
             write!(output, "\x1b[38;5;{color}m")
         }
         ColorMode::Ansi16 => {
-            let color = if cell.color_hotness_bucket > 170 {
+            let color = if cell.message_color_bucket > 0 {
+                ansi16_message_color(cell.message_color_bucket)
+            } else if cell.color_hotness_bucket > 170 {
                 31
             } else if cell.color_hotness_bucket > 84 {
                 33
@@ -220,9 +224,32 @@ fn write_color(mut output: impl Write, cell: &RenderCell, color_mode: ColorMode)
     }
 }
 
+fn ansi256_message_color(color_bucket: u8) -> u8 {
+    match color_bucket {
+        1 => 39,
+        2 => 46,
+        3 => 226,
+        4 => 196,
+        _ => 46,
+    }
+}
+
+fn ansi16_message_color(color_bucket: u8) -> u8 {
+    match color_bucket {
+        1 => 34,
+        2 => 32,
+        3 => 33,
+        4 => 31,
+        _ => 32,
+    }
+}
+
 fn truecolor_rgb(cell: &RenderCell) -> (u8, u8, u8) {
     if cell.head_brightness_bucket > 0 {
         let head = cell.head_brightness_bucket;
+        if cell.message_color_bucket > 0 {
+            return message_rgb(head, cell.message_color_bucket);
+        }
         let hot = cell.color_hotness_bucket;
         return (
             scale_channel(head, 220).saturating_add(scale_channel(hot, 35)),
@@ -240,6 +267,36 @@ fn truecolor_rgb(cell: &RenderCell) -> (u8, u8, u8) {
     let red = scale_channel(hot, 180);
     let blue = green / 10;
     (red, green, blue)
+}
+
+fn message_rgb(brightness: u8, color_bucket: u8) -> (u8, u8, u8) {
+    match color_bucket {
+        1 => (
+            scale_channel(brightness, 90),
+            scale_channel(brightness, 170),
+            brightness,
+        ),
+        2 => (
+            scale_channel(brightness, 90),
+            brightness,
+            scale_channel(brightness, 120),
+        ),
+        3 => (
+            brightness,
+            scale_channel(brightness, 220),
+            scale_channel(brightness, 50),
+        ),
+        4 => (
+            brightness,
+            scale_channel(brightness, 80),
+            scale_channel(brightness, 60),
+        ),
+        _ => (
+            scale_channel(brightness, 220),
+            brightness,
+            scale_channel(brightness, 220),
+        ),
+    }
 }
 
 fn ember_rgb(cell: &RenderCell) -> (u8, u8, u8) {
@@ -299,6 +356,7 @@ mod tests {
                 RenderCell {
                     glyph: '0',
                     color_hotness_bucket: 0,
+                    message_color_bucket: 0,
                     brightness_bucket: 255,
                     head_brightness_bucket: 0,
                     ember_brightness_bucket: 0,
@@ -307,6 +365,7 @@ mod tests {
                 RenderCell {
                     glyph: '1',
                     color_hotness_bucket: 255,
+                    message_color_bucket: 0,
                     brightness_bucket: 128,
                     head_brightness_bucket: 0,
                     ember_brightness_bucket: 0,
@@ -334,6 +393,7 @@ mod tests {
                 RenderCell {
                     glyph: '0',
                     color_hotness_bucket: 0,
+                    message_color_bucket: 0,
                     brightness_bucket: 255,
                     head_brightness_bucket: 0,
                     ember_brightness_bucket: 0,
@@ -342,6 +402,7 @@ mod tests {
                 RenderCell {
                     glyph: '1',
                     color_hotness_bucket: 0,
+                    message_color_bucket: 0,
                     brightness_bucket: 255,
                     head_brightness_bucket: 0,
                     ember_brightness_bucket: 0,
@@ -367,6 +428,7 @@ mod tests {
             cells: vec![RenderCell {
                 glyph: '0',
                 color_hotness_bucket: 0,
+                message_color_bucket: 0,
                 brightness_bucket: 180,
                 head_brightness_bucket: 255,
                 ember_brightness_bucket: 0,
@@ -390,6 +452,7 @@ mod tests {
             cells: vec![RenderCell {
                 glyph: '0',
                 color_hotness_bucket: 255,
+                message_color_bucket: 0,
                 brightness_bucket: 180,
                 head_brightness_bucket: 255,
                 ember_brightness_bucket: 0,
@@ -406,6 +469,42 @@ mod tests {
     }
 
     #[test]
+    fn truecolor_renders_info_message_head_as_blue() {
+        assert_truecolor_message_head(1, "\x1b[38;2;90;170;255m");
+    }
+
+    #[test]
+    fn truecolor_renders_success_message_head_as_green() {
+        assert_truecolor_message_head(2, "\x1b[38;2;90;255;120m");
+    }
+
+    #[test]
+    fn truecolor_renders_warning_message_head_as_yellow() {
+        assert_truecolor_message_head(3, "\x1b[38;2;255;220;50m");
+    }
+
+    #[test]
+    fn truecolor_renders_error_message_head_as_red() {
+        assert_truecolor_message_head(4, "\x1b[38;2;255;80;60m");
+    }
+
+    #[test]
+    fn ansi256_renders_message_classes_with_status_colors() {
+        assert_message_color_code(ColorMode::Ansi256, 1, "\x1b[38;5;39m");
+        assert_message_color_code(ColorMode::Ansi256, 2, "\x1b[38;5;46m");
+        assert_message_color_code(ColorMode::Ansi256, 3, "\x1b[38;5;226m");
+        assert_message_color_code(ColorMode::Ansi256, 4, "\x1b[38;5;196m");
+    }
+
+    #[test]
+    fn ansi16_renders_message_classes_with_status_colors() {
+        assert_message_color_code(ColorMode::Ansi16, 1, "\x1b[34m");
+        assert_message_color_code(ColorMode::Ansi16, 2, "\x1b[32m");
+        assert_message_color_code(ColorMode::Ansi16, 3, "\x1b[33m");
+        assert_message_color_code(ColorMode::Ansi16, 4, "\x1b[31m");
+    }
+
+    #[test]
     fn truecolor_renders_trail_as_green() {
         let frame = Frame {
             width: 1,
@@ -413,6 +512,7 @@ mod tests {
             cells: vec![RenderCell {
                 glyph: '0',
                 color_hotness_bucket: 0,
+                message_color_bucket: 0,
                 brightness_bucket: 180,
                 head_brightness_bucket: 0,
                 ember_brightness_bucket: 0,
@@ -436,6 +536,7 @@ mod tests {
             cells: vec![RenderCell {
                 glyph: '0',
                 color_hotness_bucket: 0,
+                message_color_bucket: 0,
                 brightness_bucket: 148,
                 head_brightness_bucket: 0,
                 ember_brightness_bucket: 148,
@@ -459,6 +560,7 @@ mod tests {
             cells: vec![RenderCell {
                 glyph: '0',
                 color_hotness_bucket: 255,
+                message_color_bucket: 0,
                 brightness_bucket: 148,
                 head_brightness_bucket: 0,
                 ember_brightness_bucket: 148,
@@ -492,6 +594,39 @@ mod tests {
                 height: 40
             }
         );
+    }
+
+    fn assert_truecolor_message_head(color_bucket: u8, expected: &str) {
+        let output = render_message_head(color_bucket, ColorMode::TrueColor);
+
+        assert!(output.contains(expected));
+    }
+
+    fn assert_message_color_code(color_mode: ColorMode, color_bucket: u8, expected: &str) {
+        let output = render_message_head(color_bucket, color_mode);
+
+        assert!(output.contains(expected));
+    }
+
+    fn render_message_head(color_bucket: u8, color_mode: ColorMode) -> String {
+        let frame = Frame {
+            width: 1,
+            height: 1,
+            cells: vec![RenderCell {
+                glyph: '0',
+                color_hotness_bucket: 0,
+                message_color_bucket: color_bucket,
+                brightness_bucket: 180,
+                head_brightness_bucket: 255,
+                ember_brightness_bucket: 0,
+                ember_color_hotness_bucket: 0,
+            }],
+        };
+        let mut output = Vec::new();
+
+        write_frame(&mut output, &frame, color_mode).unwrap();
+
+        String::from_utf8(output).unwrap()
     }
 
     #[test]

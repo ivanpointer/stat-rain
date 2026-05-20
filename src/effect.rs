@@ -121,6 +121,7 @@ impl Default for EffectState {
 pub struct RenderCell {
     pub glyph: char,
     pub color_hotness_bucket: u8,
+    pub message_color_bucket: u8,
     pub brightness_bucket: u8,
     pub head_brightness_bucket: u8,
     pub ember_brightness_bucket: u8,
@@ -209,6 +210,7 @@ pub fn apply_message_overlay(frame: &mut Frame, message: &MessageOverlay, intens
         cell.color_hotness_bucket = cell
             .color_hotness_bucket
             .max(message.class.color_hotness_bucket());
+        cell.message_color_bucket = message.class.color_bucket();
         cell.ember_brightness_bucket = 0;
     }
 }
@@ -415,6 +417,7 @@ impl RainEngine {
                 cells.push(RenderCell {
                     glyph,
                     color_hotness_bucket: hotness,
+                    message_color_bucket: 0,
                     brightness_bucket,
                     head_brightness_bucket,
                     ember_brightness_bucket: bucket(ember_brightness),
@@ -1116,6 +1119,13 @@ mod tests {
             .map(|cell| cell.color_hotness_bucket)
             .collect::<Vec<_>>();
         assert_eq!(hotnesses, vec![255, 255, 255, 255, 255]);
+        let message_colors = frame
+            .cells
+            .iter()
+            .filter(|cell| cell.head_brightness_bucket > 0)
+            .map(|cell| cell.message_color_bucket)
+            .collect::<Vec<_>>();
+        assert_eq!(message_colors, vec![4, 4, 4, 4, 4]);
     }
 
     #[test]
@@ -1313,6 +1323,7 @@ mod tests {
         RenderCell {
             glyph: ' ',
             color_hotness_bucket: 0,
+            message_color_bucket: 0,
             brightness_bucket: 0,
             head_brightness_bucket: 0,
             ember_brightness_bucket: 0,
