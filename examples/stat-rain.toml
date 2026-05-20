@@ -1,0 +1,19 @@
+# Generated starter config for stat-rain.
+
+[profiles.default.map]
+speed = "cpu.normalized * 8 + 1"
+density = "memory.normalized * 0.5 + 0.2"
+color_hotness = "cpu.normalized"
+brightness = "memory.normalized * 0.4 + 0.5"
+fade_length = "cpu.normalized * 6 + 4"
+glyph_churn = "cpu.normalized * 0.5 + 0.1"
+message_reveal_intensity = "external.message_pressure.normalized"
+
+[profiles.thermal.map]
+speed = "cpu.normalized * 5 + 1"
+density = "memory.normalized * 0.4 + 0.3"
+color_hotness = "thermal_zone.raw / 100"
+brightness = "cpu.normalized * 0.3 + 0.6"
+fade_length = "memory.normalized * 8 + 4"
+glyph_churn = "cpu.normalized * 0.35 + 0.1"
+message_reveal_intensity = "external.message_pressure.normalized"

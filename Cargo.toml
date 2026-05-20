@@ -15,3 +15,7 @@ toml = "0.8"
 [dev-dependencies]
 criterion = "0.5"
 tempfile = "3.10"
+
+[[bench]]
+name = "render_loop"
+harness = false
