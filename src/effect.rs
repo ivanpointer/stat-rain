@@ -16,6 +16,74 @@ pub enum GlyphSet {
     Ascii,
 }
 
+#[derive(Debug, Clone)]
+pub struct EffectSmoother {
+    current: Option<EffectState>,
+    transition_start: Option<EffectState>,
+    target: Option<EffectState>,
+    elapsed: std::time::Duration,
+    window: std::time::Duration,
+}
+
+impl EffectSmoother {
+    pub fn new(window: std::time::Duration) -> Self {
+        Self {
+            current: None,
+            transition_start: None,
+            target: None,
+            elapsed: std::time::Duration::ZERO,
+            window,
+        }
+    }
+
+    pub fn update(&mut self, target: EffectState, elapsed: std::time::Duration) -> EffectState {
+        let Some(current) = self.current else {
+            self.current = Some(target);
+            self.transition_start = Some(target);
+            self.target = Some(target);
+            return target;
+        };
+
+        if self.window.is_zero() {
+            self.current = Some(target);
+            self.transition_start = Some(target);
+            self.target = Some(target);
+            self.elapsed = std::time::Duration::ZERO;
+            return target;
+        }
+
+        if self.target != Some(target) {
+            self.transition_start = Some(current);
+            self.target = Some(target);
+            self.elapsed = std::time::Duration::ZERO;
+        }
+
+        self.elapsed = self.elapsed.saturating_add(elapsed);
+        let factor = (self.elapsed.as_secs_f64() / self.window.as_secs_f64()).clamp(0.0, 1.0);
+        let start = self.transition_start.unwrap_or(current);
+        let smoothed = EffectState {
+            speed: lerp(start.speed, target.speed, factor),
+            density: lerp(start.density, target.density, factor),
+            color_hotness: lerp(start.color_hotness, target.color_hotness, factor),
+            brightness: lerp(start.brightness, target.brightness, factor),
+            fade_length: lerp(start.fade_length, target.fade_length, factor),
+            glyph_churn: lerp(start.glyph_churn, target.glyph_churn, factor),
+            message_reveal_intensity: lerp(
+                start.message_reveal_intensity,
+                target.message_reveal_intensity,
+                factor,
+            ),
+            glyph_set: target.glyph_set,
+        };
+        self.current = Some(smoothed);
+        smoothed
+    }
+}
+
+fn lerp(current: f64, target: f64, factor: f64) -> f64 {
+    current + (target - current) * factor
+}
+
 impl Default for EffectState {
     fn default() -> Self {
         Self {
@@ -175,6 +243,7 @@ fn bucket(value: f64) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn engine_generates_one_cell_per_position() {
@@ -248,6 +317,100 @@ mod tests {
         let after = brightest_row(&engine.step(faster));
 
         assert!(forward_distance(before, after, 100) <= 2);
+    }
+
+    #[test]
+    fn smoother_returns_first_target_immediately() {
+        let mut smoother = EffectSmoother::new(Duration::from_secs(2));
+        let target = EffectState {
+            speed: 5.0,
+            density: 0.8,
+            ..EffectState::default()
+        };
+
+        assert_eq!(smoother.update(target, Duration::from_millis(500)), target);
+    }
+
+    #[test]
+    fn smoother_moves_numeric_fields_toward_target_over_window() {
+        let mut smoother = EffectSmoother::new(Duration::from_secs(2));
+        smoother.update(
+            EffectState {
+                speed: 1.0,
+                density: 0.2,
+                ..EffectState::default()
+            },
+            Duration::ZERO,
+        );
+
+        let smoothed = smoother.update(
+            EffectState {
+                speed: 9.0,
+                density: 0.8,
+                ..EffectState::default()
+            },
+            Duration::from_secs(1),
+        );
+
+        assert_eq!(smoothed.speed, 5.0);
+        assert_eq!(smoothed.density, 0.5);
+    }
+
+    #[test]
+    fn smoother_reaches_target_after_full_window() {
+        let mut smoother = EffectSmoother::new(Duration::from_secs(2));
+        smoother.update(EffectState::default(), Duration::ZERO);
+        let target = EffectState {
+            speed: 9.0,
+            density: 0.8,
+            ..EffectState::default()
+        };
+
+        assert_eq!(smoother.update(target, Duration::from_secs(2)), target);
+    }
+
+    #[test]
+    fn smoother_reaches_target_after_incremental_window() {
+        let mut smoother = EffectSmoother::new(Duration::from_secs(2));
+        smoother.update(
+            EffectState {
+                speed: 1.0,
+                ..EffectState::default()
+            },
+            Duration::ZERO,
+        );
+        let target = EffectState {
+            speed: 9.0,
+            ..EffectState::default()
+        };
+
+        for _ in 0..3 {
+            let smoothed = smoother.update(target, Duration::from_millis(500));
+            assert_ne!(smoothed.speed, 9.0);
+        }
+
+        assert_eq!(
+            smoother.update(target, Duration::from_millis(500)).speed,
+            9.0
+        );
+    }
+
+    #[test]
+    fn smoother_switches_glyph_set_immediately() {
+        let mut smoother = EffectSmoother::new(Duration::from_secs(2));
+        smoother.update(EffectState::default(), Duration::ZERO);
+
+        let smoothed = smoother.update(
+            EffectState {
+                speed: 9.0,
+                glyph_set: GlyphSet::Ascii,
+                ..EffectState::default()
+            },
+            Duration::from_millis(1),
+        );
+
+        assert_eq!(smoothed.glyph_set, GlyphSet::Ascii);
+        assert_ne!(smoothed.speed, 9.0);
     }
 
     fn brightest_row(frame: &Frame) -> usize {

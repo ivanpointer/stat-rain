@@ -1,7 +1,7 @@
 use anyhow::Result;
 use stat_rain::cli::{Cli, Command, RunArgs};
 use stat_rain::config::AppConfig;
-use stat_rain::effect::GlyphSet;
+use stat_rain::effect::{EffectSmoother, GlyphSet};
 use stat_rain::metrics::{MetricProvider, MetricRegistry, MetricValue};
 use stat_rain::system_metrics::BuiltinSystemProvider;
 use stat_rain::terminal::{self, FrameRenderer, TerminalCapabilities, TerminalSize};
@@ -39,6 +39,8 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
     sample_builtin_metrics(&mut provider, &mut metrics);
     let metric_interval = Duration::from_millis(args.metric_sample_ms);
     let mut last_metric_sample = Instant::now();
+    let mut last_frame = Instant::now();
+    let mut smoother = EffectSmoother::new(Duration::from_millis(args.effect_smoothing_ms));
     let frames = args.frames.unwrap_or(u64::MAX);
     let delay = Duration::from_millis(args.frame_delay_ms);
     let caps = TerminalCapabilities::detect_from_env(
@@ -62,10 +64,14 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
             sample_builtin_metrics(&mut provider, &mut metrics);
             last_metric_sample = Instant::now();
         }
-        let mut state = config.evaluate_effect_state(&metrics)?;
+        let now = Instant::now();
+        let frame_elapsed = now.duration_since(last_frame);
+        last_frame = now;
+        let mut target_state = config.evaluate_effect_state(&metrics)?;
         if args.ascii {
-            state.glyph_set = GlyphSet::Ascii;
+            target_state.glyph_set = GlyphSet::Ascii;
         }
+        let state = smoother.update(target_state, frame_elapsed);
         let new_size = current_size(&args);
         if should_rebuild_engine(size, new_size) {
             size = new_size;
@@ -141,6 +147,7 @@ fn sample_builtin_metrics(provider: &mut impl MetricProvider, metrics: &mut Metr
         Ok(sample) => metrics.apply_sample(sample),
         Err(_) => {
             metrics.mark_stale("cpu");
+            metrics.mark_stale("cpu.total");
             metrics.mark_stale("memory");
         }
     }
@@ -149,6 +156,7 @@ fn sample_builtin_metrics(provider: &mut impl MetricProvider, metrics: &mut Metr
 fn initial_metric_registry() -> MetricRegistry {
     let mut metrics = MetricRegistry::default();
     metrics.set("cpu", MetricValue::new(Some(0.0), Some(0.0)));
+    metrics.set("cpu.total", MetricValue::new(Some(0.0), Some(0.0)));
     metrics.set("memory", MetricValue::new(Some(0.0), Some(0.0)));
     metrics.set("thermal_zone", MetricValue::new(Some(45.0), Some(0.45)));
     metrics.set(

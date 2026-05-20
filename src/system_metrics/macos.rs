@@ -22,10 +22,9 @@ impl MacosSystemProvider {
 
         if let Some(previous_cpu) = self.previous_cpu {
             if let Some(normalized) = normalized_cpu_usage(previous_cpu, cpu) {
-                sample.set(
-                    "cpu",
-                    MetricValue::new(Some(normalized * 100.0), Some(normalized)),
-                );
+                let value = MetricValue::new(Some(normalized * 100.0), Some(normalized));
+                sample.set("cpu", value);
+                sample.set("cpu.total", value);
             }
         }
         self.previous_cpu = Some(cpu);
@@ -204,6 +203,7 @@ mod tests {
         assert!(first.get("cpu").is_none());
         assert_eq!(first.get("memory").unwrap().normalized, Some(0.5));
         assert_eq!(second.get("cpu").unwrap().normalized, Some(0.5));
+        assert_eq!(second.get("cpu.total").unwrap().normalized, Some(0.5));
         assert_eq!(second.get("memory").unwrap().normalized, Some(0.75));
     }
 }
