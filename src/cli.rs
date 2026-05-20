@@ -35,6 +35,9 @@ pub struct RunArgs {
     pub simulated_metrics: Vec<String>,
 
     #[arg(long)]
+    pub socket: Option<PathBuf>,
+
+    #[arg(long)]
     pub frames: Option<u64>,
 
     #[arg(long = "frame-delay-ms", default_value_t = 33)]

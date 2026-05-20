@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use std::io::{Read, Write};
 
 pub const PROTOCOL_VERSION: u8 = 1;
 
@@ -66,6 +67,24 @@ impl ProtocolMessage {
             kind => bail!("unsupported protocol message kind: {kind}"),
         }
     }
+}
+
+pub fn write_framed_message(mut output: impl Write, message: &ProtocolMessage) -> Result<()> {
+    let mut payload = Vec::new();
+    message.encode(&mut payload);
+    let len = u32::try_from(payload.len())?;
+    output.write_all(&len.to_le_bytes())?;
+    output.write_all(&payload)?;
+    Ok(())
+}
+
+pub fn read_framed_message(mut input: impl Read) -> Result<ProtocolMessage> {
+    let mut len_bytes = [0_u8; 4];
+    input.read_exact(&mut len_bytes)?;
+    let len = u32::from_le_bytes(len_bytes) as usize;
+    let mut payload = vec![0_u8; len];
+    input.read_exact(&mut payload)?;
+    ProtocolMessage::decode(&payload)
 }
 
 fn write_string(output: &mut Vec<u8>, value: &str) {
@@ -152,5 +171,29 @@ mod tests {
         message.encode(&mut encoded);
 
         assert_eq!(ProtocolMessage::decode(&encoded).unwrap(), message);
+    }
+
+    #[test]
+    fn round_trips_framed_message() {
+        let message = ProtocolMessage::MetricUpdate {
+            name: "cpu".to_string(),
+            raw: None,
+            normalized: Some(0.99),
+        };
+        let mut stream = Vec::new();
+
+        write_framed_message(&mut stream, &message).unwrap();
+
+        assert_eq!(
+            read_framed_message(&mut stream.as_slice()).unwrap(),
+            message
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_framed_message() {
+        let mut stream = [8_u8, 0, 0, 0, PROTOCOL_VERSION, 1].as_slice();
+
+        assert!(read_framed_message(&mut stream).is_err());
     }
 }

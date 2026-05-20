@@ -17,6 +17,7 @@ make build
 make test
 make bench
 make run
+make run-socket
 make run-fake-hot
 make stress-cpu
 make fmt
@@ -41,6 +42,24 @@ To create real CPU pressure while watching another pane, run:
 ```sh
 cargo run -- stress-cpu --threads 8 --duration-seconds 30
 ```
+
+To change synthetic metrics while the rain is running, use two terminals. In the
+rain pane:
+
+```sh
+cargo run -- run --socket /tmp/stat-rain.sock
+```
+
+In another pane:
+
+```sh
+cargo run -- send --socket /tmp/stat-rain.sock --metric cpu --value 0.02
+cargo run -- send --socket /tmp/stat-rain.sock --metric cpu --value 0.99
+cargo run -- send --socket /tmp/stat-rain.sock --metric cpu --value 0.50
+```
+
+The pushed `cpu` metric also updates `cpu.total`, and external values stay
+authoritative over built-in CPU samples until another value is pushed.
 
 `devbox` provides the project toolchain when available:
 

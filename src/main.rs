@@ -1,14 +1,19 @@
-use anyhow::Result;
-use stat_rain::cli::{Cli, Command, RunArgs, StressCpuArgs};
+use anyhow::{bail, Result};
+use stat_rain::cli::{Cli, Command, RunArgs, SendArgs, StressCpuArgs};
 use stat_rain::config::AppConfig;
 use stat_rain::dev_tools;
 use stat_rain::effect::{EffectSmoother, GlyphSet};
 use stat_rain::metrics::{MetricProvider, MetricRegistry, MetricValue};
+use stat_rain::protocol::{self, ProtocolMessage};
 use stat_rain::system_metrics::BuiltinSystemProvider;
 use stat_rain::terminal::{self, FrameRenderer, TerminalCapabilities, TerminalSize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,13 +26,40 @@ fn main() -> Result<()> {
         Command::Init(_) => {
             println!("stat-rain init scaffold");
         }
-        Command::Send(_) => {
-            println!("stat-rain send scaffold");
-        }
+        Command::Send(args) => send(args)?,
         Command::StressCpu(args) => stress_cpu(args)?,
     }
 
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct ExternalMetricOverrides {
+    metrics: BTreeMap<String, MetricValue>,
+}
+
+impl ExternalMetricOverrides {
+    fn set(&mut self, name: String, value: MetricValue) {
+        self.metrics.insert(name.clone(), value);
+        if name == "cpu" {
+            self.metrics.insert("cpu.total".to_string(), value);
+        }
+    }
+
+    fn mark_stale(&mut self, name: String) {
+        let value = MetricValue {
+            raw: None,
+            normalized: Some(1.0),
+            stale: true,
+        };
+        self.set(name, value);
+    }
+
+    fn apply_to(&self, metrics: &mut MetricRegistry) {
+        for (name, value) in &self.metrics {
+            metrics.set(name.clone(), *value);
+        }
+    }
 }
 
 fn run(args: RunArgs) -> Result<()> {
@@ -38,6 +70,7 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
     let config = load_config(&args)?;
     let simulated_metrics = dev_tools::parse_simulated_metrics(&args.simulated_metrics)?;
     let mut metrics = initial_metric_registry();
+    let mut external_overrides = ExternalMetricOverrides::default();
     let mut provider = BuiltinSystemProvider::new();
     sample_builtin_metrics(&mut provider, &mut metrics);
     dev_tools::apply_simulated_metrics(&mut metrics, &simulated_metrics);
@@ -58,15 +91,21 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
     let mut engine = stat_rain::effect::RainEngine::new(size.width, size.height, 0x5154_5241_494e);
     let mut renderer = FrameRenderer::new(color_mode);
     let interrupted = install_interrupt_flag()?;
+    let socket_input = match &args.socket {
+        Some(path) => Some(start_socket_listener(path, Arc::clone(&interrupted))?),
+        None => None,
+    };
 
     terminal::write_enter(&mut *output, alternate_screen)?;
     for _ in 0..frames {
         if interrupted.load(Ordering::Relaxed) {
             break;
         }
+        drain_socket_messages(&socket_input, &mut metrics, &mut external_overrides);
         if last_metric_sample.elapsed() >= metric_interval {
             sample_builtin_metrics(&mut provider, &mut metrics);
             dev_tools::apply_simulated_metrics(&mut metrics, &simulated_metrics);
+            external_overrides.apply_to(&mut metrics);
             last_metric_sample = Instant::now();
         }
         let now = Instant::now();
@@ -91,8 +130,116 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
         }
     }
     terminal::write_exit(&mut *output, alternate_screen)?;
+    interrupted.store(true, Ordering::Relaxed);
 
     Ok(())
+}
+
+fn send(args: SendArgs) -> Result<()> {
+    let message = message_from_send_args(&args)?;
+    send_protocol_message(&args.socket, &message)
+}
+
+fn send_protocol_message(path: &Path, message: &ProtocolMessage) -> Result<()> {
+    let mut stream = UnixStream::connect(path)?;
+    protocol::write_framed_message(&mut stream, message)
+}
+
+struct SocketInput {
+    path: PathBuf,
+    receiver: Receiver<ProtocolMessage>,
+}
+
+impl Drop for SocketInput {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn start_socket_listener(path: &Path, interrupted: Arc<AtomicBool>) -> Result<SocketInput> {
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    let listener = UnixListener::bind(path)?;
+    listener.set_nonblocking(true)?;
+    let (sender, receiver) = mpsc::channel();
+
+    thread::spawn(move || {
+        while !interrupted.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    if let Ok(message) = protocol::read_framed_message(stream) {
+                        let _ = sender.send(message);
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(25));
+                }
+            }
+        }
+    });
+
+    Ok(SocketInput {
+        path: path.to_path_buf(),
+        receiver,
+    })
+}
+
+fn drain_socket_messages(
+    socket_input: &Option<SocketInput>,
+    metrics: &mut MetricRegistry,
+    overrides: &mut ExternalMetricOverrides,
+) {
+    let Some(socket_input) = socket_input else {
+        return;
+    };
+    while let Ok(message) = socket_input.receiver.try_recv() {
+        apply_protocol_message(metrics, overrides, message);
+    }
+}
+
+fn message_from_send_args(args: &SendArgs) -> Result<ProtocolMessage> {
+    match (&args.metric, args.value, &args.message) {
+        (Some(name), Some(value), None) => {
+            if !(0.0..=1.0).contains(&value) || !value.is_finite() {
+                bail!("--value must be a finite normalized value between 0.0 and 1.0");
+            }
+            Ok(ProtocolMessage::MetricUpdate {
+                name: name.clone(),
+                raw: None,
+                normalized: Some(value),
+            })
+        }
+        (None, None, Some(text)) => Ok(ProtocolMessage::TextInjection { text: text.clone() }),
+        (Some(_), None, None) => bail!("--metric requires --value"),
+        _ => bail!("provide either --metric with --value, or --message"),
+    }
+}
+
+fn apply_protocol_message(
+    metrics: &mut MetricRegistry,
+    overrides: &mut ExternalMetricOverrides,
+    message: ProtocolMessage,
+) {
+    match message {
+        ProtocolMessage::MetricUpdate {
+            name,
+            raw,
+            normalized,
+        } => {
+            let value = MetricValue::new(raw, normalized);
+            overrides.set(name, value);
+            overrides.apply_to(metrics);
+        }
+        ProtocolMessage::MetricStale { name } => {
+            overrides.mark_stale(name);
+            overrides.apply_to(metrics);
+        }
+        ProtocolMessage::TextInjection { .. } => {}
+    }
 }
 
 fn stress_cpu(args: StressCpuArgs) -> Result<()> {
@@ -160,6 +307,44 @@ mod tests {
                 height: 24
             }
         ));
+    }
+
+    #[test]
+    fn send_metric_args_create_metric_update_message() {
+        let args = stat_rain::cli::SendArgs {
+            socket: "/tmp/stat-rain.sock".into(),
+            metric: Some("cpu".to_string()),
+            value: Some(0.99),
+            message: None,
+        };
+
+        assert_eq!(
+            message_from_send_args(&args).unwrap(),
+            stat_rain::protocol::ProtocolMessage::MetricUpdate {
+                name: "cpu".to_string(),
+                raw: None,
+                normalized: Some(0.99)
+            }
+        );
+    }
+
+    #[test]
+    fn external_cpu_metric_update_persists_as_total_override() {
+        let mut metrics = initial_metric_registry();
+        let mut overrides = ExternalMetricOverrides::default();
+        let message = stat_rain::protocol::ProtocolMessage::MetricUpdate {
+            name: "cpu".to_string(),
+            raw: None,
+            normalized: Some(0.99),
+        };
+
+        apply_protocol_message(&mut metrics, &mut overrides, message);
+        metrics.set("cpu", MetricValue::new(None, Some(0.01)));
+        metrics.set("cpu.total", MetricValue::new(None, Some(0.01)));
+        overrides.apply_to(&mut metrics);
+
+        assert_eq!(metrics.get("cpu").unwrap().normalized, Some(0.99));
+        assert_eq!(metrics.get("cpu.total").unwrap().normalized, Some(0.99));
     }
 }
 
