@@ -22,14 +22,21 @@ impl MacosSystemProvider {
 
         if let Some(previous_cpu) = self.previous_cpu {
             if let Some(normalized) = normalized_cpu_usage(previous_cpu, cpu) {
-                sample.set("cpu", MetricValue::new(Some(normalized * 100.0), Some(normalized)));
+                sample.set(
+                    "cpu",
+                    MetricValue::new(Some(normalized * 100.0), Some(normalized)),
+                );
             }
         }
         self.previous_cpu = Some(cpu);
 
-        if let Some(normalized) = normalized_memory_usage(memory.total_bytes, memory.available_bytes)
+        if let Some(normalized) =
+            normalized_memory_usage(memory.total_bytes, memory.available_bytes)
         {
-            sample.set("memory", MetricValue::new(Some(normalized * 100.0), Some(normalized)));
+            sample.set(
+                "memory",
+                MetricValue::new(Some(normalized * 100.0), Some(normalized)),
+            );
         }
 
         sample

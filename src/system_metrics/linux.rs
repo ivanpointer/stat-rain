@@ -22,13 +22,19 @@ impl LinuxSystemProvider {
 
         if let Some(previous_cpu) = self.previous_cpu {
             if let Some(normalized) = normalized_cpu_usage(previous_cpu, current_cpu) {
-                sample.set("cpu", MetricValue::new(Some(normalized * 100.0), Some(normalized)));
+                sample.set(
+                    "cpu",
+                    MetricValue::new(Some(normalized * 100.0), Some(normalized)),
+                );
             }
         }
         self.previous_cpu = Some(current_cpu);
 
         if let Some(normalized) = normalized_memory_usage(memory.total_kib, memory.available_kib) {
-            sample.set("memory", MetricValue::new(Some(normalized * 100.0), Some(normalized)));
+            sample.set(
+                "memory",
+                MetricValue::new(Some(normalized * 100.0), Some(normalized)),
+            );
         }
 
         Ok(sample)
