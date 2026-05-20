@@ -5,14 +5,18 @@ use crate::metrics::{
 use anyhow::{Context, Result};
 use std::ffi::CString;
 use std::mem::{size_of, MaybeUninit};
+use std::os::raw::{c_char, c_void};
 use std::ptr;
 use std::time::Instant;
 
+const DISK_IO_MAX_BYTES_PER_SEC: f64 = 250_000_000.0;
 const NETWORK_IO_MAX_BYTES_PER_SEC: f64 = 125_000_000.0;
 
 #[derive(Debug, Default)]
 pub struct MacosSystemProvider {
     previous_cpu: Option<CpuTicks>,
+    previous_disk_bytes: Option<u64>,
+    previous_disk_sample: Option<Instant>,
     previous_network_bytes: Option<u64>,
     previous_network_sample: Option<Instant>,
 }
@@ -24,20 +28,34 @@ impl MacosSystemProvider {
 
     fn sample_from_values(&mut self, cpu: CpuTicks, memory: MacosMemory) -> MetricSample {
         let now = Instant::now();
-        let elapsed_secs = self
+        let disk_elapsed_secs = self
+            .previous_disk_sample
+            .map(|previous| now.duration_since(previous).as_secs_f64())
+            .unwrap_or(0.0);
+        let network_elapsed_secs = self
             .previous_network_sample
             .map(|previous| now.duration_since(previous).as_secs_f64())
             .unwrap_or(0.0);
+        let disk_bytes = read_disk_bytes().ok();
         let network_bytes = read_network_bytes().ok();
-        self.sample_from_values_with_io(cpu, memory, network_bytes, elapsed_secs)
+        self.sample_from_values_with_io(
+            cpu,
+            memory,
+            disk_bytes,
+            disk_elapsed_secs,
+            network_bytes,
+            network_elapsed_secs,
+        )
     }
 
     fn sample_from_values_with_io(
         &mut self,
         cpu: CpuTicks,
         memory: MacosMemory,
+        disk_bytes: Option<u64>,
+        disk_elapsed_secs: f64,
         network_bytes: Option<u64>,
-        elapsed_secs: f64,
+        network_elapsed_secs: f64,
     ) -> MetricSample {
         let mut sample = MetricSample::default();
 
@@ -59,12 +77,27 @@ impl MacosSystemProvider {
             );
         }
 
+        if let Some(disk_bytes) = disk_bytes {
+            if let Some(previous_disk_bytes) = self.previous_disk_bytes {
+                if let Some((raw, normalized)) = normalized_io_rate(
+                    previous_disk_bytes,
+                    disk_bytes,
+                    disk_elapsed_secs,
+                    DISK_IO_MAX_BYTES_PER_SEC,
+                ) {
+                    sample.set("disk_io", MetricValue::new(Some(raw), Some(normalized)));
+                }
+            }
+            self.previous_disk_bytes = Some(disk_bytes);
+            self.previous_disk_sample = Some(Instant::now());
+        }
+
         if let Some(network_bytes) = network_bytes {
             if let Some(previous_network_bytes) = self.previous_network_bytes {
                 if let Some((raw, normalized)) = normalized_io_rate(
                     previous_network_bytes,
                     network_bytes,
-                    elapsed_secs,
+                    network_elapsed_secs,
                     NETWORK_IO_MAX_BYTES_PER_SEC,
                 ) {
                     sample.set("network_io", MetricValue::new(Some(raw), Some(normalized)));
@@ -175,6 +208,180 @@ fn sysctl_u64(name: &str) -> Result<u64> {
     Ok(value)
 }
 
+type CFAllocatorRef = *const c_void;
+type CFDictionaryRef = *const c_void;
+type CFMutableDictionaryRef = *mut c_void;
+type CFNumberRef = *const c_void;
+type CFStringRef = *const c_void;
+type CFTypeRef = *const c_void;
+type IoObject = u32;
+type IoIterator = IoObject;
+type IoRegistryEntry = IoObject;
+
+const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+const K_CF_NUMBER_SINT64_TYPE: i32 = 4;
+const K_IO_RETURN_SUCCESS: i32 = 0;
+const K_IO_MAIN_PORT_DEFAULT: libc::mach_port_t = 0;
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFDictionaryGetValue(dict: CFDictionaryRef, key: *const c_void) -> *const c_void;
+    fn CFNumberGetValue(number: CFNumberRef, the_type: i32, value: *mut c_void) -> bool;
+    fn CFRelease(value: CFTypeRef);
+    fn CFStringCreateWithCString(
+        alloc: CFAllocatorRef,
+        c_str: *const c_char,
+        encoding: u32,
+    ) -> CFStringRef;
+}
+
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    fn IOIteratorNext(iterator: IoIterator) -> IoObject;
+    fn IOObjectRelease(object: IoObject) -> i32;
+    fn IORegistryEntryCreateCFProperty(
+        entry: IoRegistryEntry,
+        key: CFStringRef,
+        allocator: CFAllocatorRef,
+        options: u32,
+    ) -> CFTypeRef;
+    fn IOServiceGetMatchingServices(
+        main_port: libc::mach_port_t,
+        matching: CFDictionaryRef,
+        existing: *mut IoIterator,
+    ) -> i32;
+    fn IOServiceMatching(name: *const c_char) -> CFMutableDictionaryRef;
+}
+
+struct CfRef<T>
+where
+    T: Copy + Into<CFTypeRef>,
+{
+    value: T,
+}
+
+impl<T> CfRef<T>
+where
+    T: Copy + Into<CFTypeRef>,
+{
+    fn new(value: T) -> Self {
+        Self { value }
+    }
+
+    fn get(&self) -> T {
+        self.value
+    }
+}
+
+impl<T> Drop for CfRef<T>
+where
+    T: Copy + Into<CFTypeRef>,
+{
+    fn drop(&mut self) {
+        let value = self.value.into();
+        if !value.is_null() {
+            unsafe { CFRelease(value) };
+        }
+    }
+}
+
+struct IoRef {
+    value: IoObject,
+}
+
+impl IoRef {
+    fn new(value: IoObject) -> Self {
+        Self { value }
+    }
+
+    fn get(&self) -> IoObject {
+        self.value
+    }
+}
+
+impl Drop for IoRef {
+    fn drop(&mut self) {
+        if self.value != 0 {
+            unsafe { IOObjectRelease(self.value) };
+        }
+    }
+}
+
+fn cf_string(value: &str) -> Result<CfRef<CFStringRef>> {
+    let value = CString::new(value)?;
+    let cf_value = unsafe {
+        CFStringCreateWithCString(ptr::null(), value.as_ptr(), K_CF_STRING_ENCODING_UTF8)
+    };
+    if cf_value.is_null() {
+        anyhow::bail!("failed to create CFString");
+    }
+    Ok(CfRef::new(cf_value))
+}
+
+fn cf_number_u64(value: CFNumberRef) -> Option<u64> {
+    if value.is_null() {
+        return None;
+    }
+    let mut number = 0_i64;
+    let ok = unsafe {
+        CFNumberGetValue(
+            value,
+            K_CF_NUMBER_SINT64_TYPE,
+            &mut number as *mut _ as *mut c_void,
+        )
+    };
+    if ok && number >= 0 {
+        Some(number as u64)
+    } else {
+        None
+    }
+}
+
+fn read_disk_bytes() -> Result<u64> {
+    let class_name = CString::new("IOBlockStorageDriver")?;
+    let matching = unsafe { IOServiceMatching(class_name.as_ptr()) };
+    if matching.is_null() {
+        anyhow::bail!("IOServiceMatching failed for IOBlockStorageDriver");
+    }
+
+    let mut iterator = 0;
+    let result =
+        unsafe { IOServiceGetMatchingServices(K_IO_MAIN_PORT_DEFAULT, matching, &mut iterator) };
+    if result != K_IO_RETURN_SUCCESS {
+        anyhow::bail!("IOServiceGetMatchingServices failed: {result}");
+    }
+    let iterator = IoRef::new(iterator);
+    let statistics_key = cf_string("Statistics")?;
+    let bytes_read_key = cf_string("Bytes (Read)")?;
+    let bytes_written_key = cf_string("Bytes (Write)")?;
+
+    let mut total = 0_u64;
+    loop {
+        let service = unsafe { IOIteratorNext(iterator.get()) };
+        if service == 0 {
+            break;
+        }
+        let service = IoRef::new(service);
+        let statistics = unsafe {
+            IORegistryEntryCreateCFProperty(service.get(), statistics_key.get(), ptr::null(), 0)
+        };
+        if statistics.is_null() {
+            continue;
+        }
+        let statistics = CfRef::new(statistics as CFDictionaryRef);
+        let bytes_read =
+            unsafe { CFDictionaryGetValue(statistics.get(), bytes_read_key.get()) as CFNumberRef };
+        let bytes_written = unsafe {
+            CFDictionaryGetValue(statistics.get(), bytes_written_key.get()) as CFNumberRef
+        };
+        total = total
+            .saturating_add(cf_number_u64(bytes_read).unwrap_or(0))
+            .saturating_add(cf_number_u64(bytes_written).unwrap_or(0));
+    }
+
+    Ok(total)
+}
+
 fn read_network_bytes() -> Result<u64> {
     let mut addrs: *mut libc::ifaddrs = ptr::null_mut();
     if unsafe { libc::getifaddrs(&mut addrs) } != 0 {
@@ -247,6 +454,8 @@ mod tests {
                 total_bytes: 1_000,
                 available_bytes: 500,
             },
+            Some(10_000),
+            0.0,
             Some(1_000),
             0.0,
         );
@@ -261,6 +470,8 @@ mod tests {
                 total_bytes: 1_000,
                 available_bytes: 250,
             },
+            Some(16_000),
+            2.0,
             Some(3_000),
             2.0,
         );
@@ -270,6 +481,7 @@ mod tests {
         assert_eq!(second.get("cpu").unwrap().normalized, Some(0.5));
         assert_eq!(second.get("cpu.total").unwrap().normalized, Some(0.5));
         assert_eq!(second.get("memory").unwrap().normalized, Some(0.75));
+        assert_eq!(second.get("disk_io").unwrap().raw, Some(3_000.0));
         assert_eq!(second.get("network_io").unwrap().raw, Some(1_000.0));
     }
 }

@@ -6,7 +6,7 @@ The first version is a passive visual monitor for tmux-style panes. It maps metr
 
 Metric-driven effect changes are smoothed over a 4 second window by default. Use `--effect-smoothing-ms` to tune that window, or set it to `0` for immediate changes.
 
-The built-in `cpu` metric is aggregate CPU usage across the machine. `cpu.total` is also exposed as an explicit alias for configs that should make that aggregate behavior obvious. `memory` and `network_io` are available as normalized metrics on macOS and Linux. `disk_io` is built in on Linux and can be pushed or simulated externally on macOS until a native IOKit disk provider lands. `disk_io.raw` and `network_io.raw` are bytes per second when available.
+The built-in `cpu` metric is aggregate CPU usage across the machine. `cpu.total` is also exposed as an explicit alias for configs that should make that aggregate behavior obvious. `memory`, `disk_io`, and `network_io` are available as normalized metrics on macOS and Linux. `disk_io.raw` and `network_io.raw` are bytes per second when available.
 
 ## Development
 
