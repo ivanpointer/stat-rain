@@ -66,6 +66,10 @@ impl MetricSample {
     pub fn set(&mut self, name: impl Into<String>, value: MetricValue) {
         self.values.insert(name.into(), value);
     }
+
+    pub fn get(&self, name: &str) -> Option<MetricValue> {
+        self.values.get(name).copied()
+    }
 }
 
 pub trait MetricProvider {
