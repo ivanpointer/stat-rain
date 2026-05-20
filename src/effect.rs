@@ -106,10 +106,10 @@ impl Default for EffectState {
             fade_length: 14.0,
             glyph_churn: 0.25,
             message_reveal_intensity: 0.0,
-            ember_density: 0.0075,
+            ember_density: 0.0025,
             ember_brightness: 0.9,
             ember_color_hotness: 0.0,
-            ember_fade_length: 40.0,
+            ember_fade_length: 60.0,
             glyph_set: GlyphSet::Unicode,
         }
     }
@@ -194,6 +194,7 @@ impl RainEngine {
             for x in 0..self.width {
                 let column = &self.columns[x];
                 let mut best_trail = 0.0;
+                let mut best_trace_seed = column.seed;
                 let mut rain_head = false;
                 for trace in &column.traces {
                     if density * trace.density_scale < self.trace_noise(x, trace) {
@@ -211,6 +212,7 @@ impl RainEngine {
                     }
                     if trail > best_trail {
                         best_trail = trail;
+                        best_trace_seed = trace.seed;
                     }
                 }
                 let rain_brightness = best_trail * state.brightness;
@@ -239,7 +241,7 @@ impl RainEngine {
                 } else {
                     let local_churn =
                         (glyph_churn + best_trail * 0.75 + ember_brightness).clamp(0.0, 1.0);
-                    self.glyph_for(x, y, local_churn, state.glyph_set)
+                    self.glyph_for(x, y, local_churn, state.glyph_set, best_trace_seed)
                 };
 
                 cells.push(RenderCell {
@@ -256,7 +258,13 @@ impl RainEngine {
         self.tick = self.tick.wrapping_add(1);
         for column in &mut self.columns {
             for trace in &mut column.traces {
-                trace.phase = (trace.phase + speed * trace.speed_scale) % self.height.max(1) as f64;
+                let height = self.height.max(1) as f64;
+                let next_phase = trace.phase + speed * trace.speed_scale;
+                if next_phase >= height {
+                    trace.seed = mix_hash(trace.seed ^ self.tick ^ self.height as u64);
+                    trace.speed_scale = trace_speed_scale(trace.seed);
+                }
+                trace.phase = next_phase % height;
             }
         }
 
@@ -271,7 +279,14 @@ impl RainEngine {
         (((x as u64 * 1_103_515_245 + trace.seed) >> 16) & 0xff) as f64 / 255.0
     }
 
-    fn glyph_for(&self, x: usize, y: usize, glyph_churn: f64, glyph_set: GlyphSet) -> char {
+    fn glyph_for(
+        &self,
+        x: usize,
+        y: usize,
+        glyph_churn: f64,
+        glyph_set: GlyphSet,
+        seed: u64,
+    ) -> char {
         const UNICODE_GLYPHS: &[char] = &[
             '0', '1', '3', '7', '9', 'a', 'b', 'x', 'z', 'ﾊ', 'ﾐ', 'ﾋ', 'ｰ', 'ｳ', 'ｼ', 'ﾅ', 'ﾓ',
             'ﾆ',
@@ -286,9 +301,8 @@ impl RainEngine {
         };
 
         let churn = (glyph_churn * 32.0) as u64;
-        let index = (x as u64 * 17 + y as u64 * 31 + self.tick * churn + self.columns[x].seed)
-            as usize
-            % glyphs.len();
+        let index =
+            (x as u64 * 17 + y as u64 * 31 + self.tick * churn + seed) as usize % glyphs.len();
         glyphs[index]
     }
 
@@ -326,11 +340,17 @@ impl RainEngine {
         fade_length: f64,
     ) -> f64 {
         let age = self.ember_age(x, y, density).unwrap_or(0);
-        if age as f64 >= fade_length.max(1.0) {
+        let fade_length = self.ember_fade_length(x, y, fade_length);
+        if age as f64 >= fade_length {
             return 0.0;
         }
-        let fade = 1.0 - age as f64 / fade_length.max(1.0);
+        let fade = 1.0 - age as f64 / fade_length;
         fade * brightness.clamp(0.0, 1.0)
+    }
+
+    fn ember_fade_length(&self, x: usize, y: usize, fade_length: f64) -> f64 {
+        let jitter = (mix_hash(self.cell_hash(x, y)) % 1024) as f64 / 3072.0;
+        (fade_length * (1.0 + jitter)).max(1.0)
     }
 
     fn ember_age(&self, x: usize, y: usize, density: f64) -> Option<u64> {
@@ -362,6 +382,10 @@ fn mix_hash(value: u64) -> u64 {
     mixed ^= mixed >> 27;
     mixed = mixed.wrapping_mul(0x94d0_49bb_1331_11eb);
     mixed ^ (mixed >> 31)
+}
+
+fn trace_speed_scale(seed: u64) -> f64 {
+    0.45 + (mix_hash(seed) % 140) as f64 / 100.0
 }
 
 #[derive(Debug, Clone)]
@@ -477,8 +501,48 @@ mod tests {
     fn default_embers_are_rare_and_slow_fading() {
         let state = EffectState::default();
 
-        assert_eq!(state.ember_density, 0.0075);
-        assert_eq!(state.ember_fade_length, 40.0);
+        assert_eq!(state.ember_density, 0.0025);
+        assert_eq!(state.ember_fade_length, 60.0);
+    }
+
+    #[test]
+    fn ember_lifetime_has_per_cell_jitter() {
+        let mut engine = RainEngine::new(160, 40, 7);
+        let state = EffectState {
+            density: 0.0,
+            ember_density: 1.0,
+            ember_fade_length: 60.0,
+            ember_brightness: 1.0,
+            speed: 0.0,
+            ..EffectState::default()
+        };
+
+        let first_frame = engine.step(state);
+        let ember_indices = first_frame
+            .cells
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cell)| (cell.ember_brightness_bucket == 255).then_some(index))
+            .collect::<Vec<_>>();
+        assert!(ember_indices.len() >= 12);
+
+        let mut lifetimes = vec![1; ember_indices.len()];
+        for _ in 0..90 {
+            let frame = engine.step(state);
+            for (ember_index, cell_index) in ember_indices.iter().enumerate() {
+                if frame.cells[*cell_index].ember_brightness_bucket > 0 {
+                    lifetimes[ember_index] += 1;
+                }
+            }
+        }
+
+        assert!(lifetimes
+            .iter()
+            .all(|lifetime| (60..=80).contains(lifetime)));
+        assert!(
+            lifetimes.iter().min() != lifetimes.iter().max(),
+            "expected jittered lifetimes, got {lifetimes:?}"
+        );
     }
 
     #[test]
@@ -522,12 +586,39 @@ mod tests {
     }
 
     #[test]
+    fn rain_traces_reseed_after_wrapping() {
+        let mut engine = RainEngine::new(1, 12, 7);
+        let first_seeds = engine.columns[0]
+            .traces
+            .iter()
+            .map(|trace| trace.seed)
+            .collect::<Vec<_>>();
+        let state = EffectState {
+            density: 1.0,
+            ember_density: 0.0,
+            speed: 6.0,
+            ..EffectState::default()
+        };
+
+        for _ in 0..8 {
+            engine.step(state);
+        }
+
+        let later_seeds = engine.columns[0]
+            .traces
+            .iter()
+            .map(|trace| trace.seed)
+            .collect::<Vec<_>>();
+        assert_ne!(first_seeds, later_seeds);
+    }
+
+    #[test]
     fn about_half_of_ember_glyphs_never_change_during_full_fade_window() {
         let mut engine = RainEngine::new(120, 40, 7);
         let state = EffectState {
             density: 0.0,
             ember_density: 1.0,
-            ember_fade_length: 40.0,
+            ember_fade_length: 60.0,
             ember_brightness: 1.0,
             glyph_churn: 1.0,
             speed: 0.0,
