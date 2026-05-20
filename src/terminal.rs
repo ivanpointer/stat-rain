@@ -194,10 +194,7 @@ pub fn detect_terminal_size_from_fd(fd: RawFd) -> Option<TerminalSize> {
 fn write_color(mut output: impl Write, cell: &RenderCell, color_mode: ColorMode) -> Result<()> {
     match color_mode {
         ColorMode::TrueColor => {
-            let hot = cell.color_hotness_bucket;
-            let green = cell.brightness_bucket;
-            let red = hot.max(green / 3);
-            let blue = green / 5;
+            let (red, green, blue) = truecolor_rgb(cell);
             write!(output, "\x1b[38;2;{red};{green};{blue}m")
         }
         ColorMode::Ansi256 => {
@@ -221,6 +218,23 @@ fn write_color(mut output: impl Write, cell: &RenderCell, color_mode: ColorMode)
             write!(output, "\x1b[{color}m")
         }
     }
+}
+
+fn truecolor_rgb(cell: &RenderCell) -> (u8, u8, u8) {
+    if cell.head_brightness_bucket > 0 {
+        let head = cell.head_brightness_bucket;
+        return (scale_channel(head, 220), head, scale_channel(head, 220));
+    }
+
+    let green = cell.brightness_bucket;
+    let hot = cell.color_hotness_bucket;
+    let red = scale_channel(hot, 180);
+    let blue = green / 10;
+    (red, green, blue)
+}
+
+fn scale_channel(value: u8, max: u8) -> u8 {
+    ((value as u16 * max as u16) / 255) as u8
 }
 
 #[cfg(test)]
@@ -268,11 +282,13 @@ mod tests {
                     glyph: '0',
                     color_hotness_bucket: 0,
                     brightness_bucket: 255,
+                    head_brightness_bucket: 0,
                 },
                 RenderCell {
                     glyph: '1',
                     color_hotness_bucket: 255,
                     brightness_bucket: 128,
+                    head_brightness_bucket: 0,
                 },
             ],
         };
@@ -297,11 +313,13 @@ mod tests {
                     glyph: '0',
                     color_hotness_bucket: 0,
                     brightness_bucket: 255,
+                    head_brightness_bucket: 0,
                 },
                 RenderCell {
                     glyph: '1',
                     color_hotness_bucket: 0,
                     brightness_bucket: 255,
+                    head_brightness_bucket: 0,
                 },
             ],
         };
@@ -313,6 +331,48 @@ mod tests {
         renderer.write_frame(&mut output, &frame).unwrap();
 
         assert_eq!(String::from_utf8(output).unwrap(), "\x1b[0m");
+    }
+
+    #[test]
+    fn truecolor_renders_head_as_pale_white() {
+        let frame = Frame {
+            width: 1,
+            height: 1,
+            cells: vec![RenderCell {
+                glyph: '0',
+                color_hotness_bucket: 0,
+                brightness_bucket: 180,
+                head_brightness_bucket: 255,
+            }],
+        };
+        let mut output = Vec::new();
+
+        write_frame(&mut output, &frame, ColorMode::TrueColor).unwrap();
+
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("\x1b[38;2;220;255;220m"));
+    }
+
+    #[test]
+    fn truecolor_renders_trail_as_green() {
+        let frame = Frame {
+            width: 1,
+            height: 1,
+            cells: vec![RenderCell {
+                glyph: '0',
+                color_hotness_bucket: 0,
+                brightness_bucket: 180,
+                head_brightness_bucket: 0,
+            }],
+        };
+        let mut output = Vec::new();
+
+        write_frame(&mut output, &frame, ColorMode::TrueColor).unwrap();
+
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("\x1b[38;2;0;180;18m"));
     }
 
     #[test]

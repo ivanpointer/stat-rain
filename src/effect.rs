@@ -104,6 +104,7 @@ pub struct RenderCell {
     pub glyph: char,
     pub color_hotness_bucket: u8,
     pub brightness_bucket: u8,
+    pub head_brightness_bucket: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,25 +119,25 @@ pub struct RainEngine {
     width: usize,
     height: usize,
     tick: u64,
-    phase: f64,
-    rng: Lcg,
-    column_offsets: Vec<usize>,
+    columns: Vec<ColumnState>,
 }
 
 impl RainEngine {
     pub fn new(width: usize, height: usize, seed: u64) -> Self {
         let mut rng = Lcg::new(seed);
-        let column_offsets = (0..width)
-            .map(|_| rng.next_usize(height.max(1)))
+        let columns = (0..width)
+            .map(|_| ColumnState {
+                phase: rng.next_usize(height.max(1)) as f64,
+                speed_scale: 0.65 + rng.next_usize(70) as f64 / 100.0,
+                seed: rng.next(),
+            })
             .collect::<Vec<_>>();
 
         Self {
             width,
             height,
             tick: 0,
-            phase: 0.0,
-            rng,
-            column_offsets,
+            columns,
         }
     }
 
@@ -150,7 +151,8 @@ impl RainEngine {
 
         for y in 0..self.height {
             for x in 0..self.width {
-                let head = (self.phase as usize + self.column_offsets[x]) % self.height.max(1);
+                let column = &self.columns[x];
+                let head = column.phase as usize % self.height.max(1);
                 let distance = if y <= head {
                     head - y
                 } else {
@@ -160,22 +162,31 @@ impl RainEngine {
                 let column_enabled = density >= self.column_noise(x);
                 let brightness = if column_enabled { trail } else { 0.0 } * state.brightness;
                 let brightness_bucket = bucket(brightness);
+                let head_brightness_bucket = if column_enabled && distance == 0 {
+                    bucket(state.brightness)
+                } else {
+                    0
+                };
                 let glyph = if brightness_bucket == 0 {
                     ' '
                 } else {
-                    self.glyph_for(x, y, glyph_churn, state.glyph_set)
+                    let local_churn = (glyph_churn + trail * 0.75).clamp(0.0, 1.0);
+                    self.glyph_for(x, y, local_churn, state.glyph_set)
                 };
 
                 cells.push(RenderCell {
                     glyph,
                     color_hotness_bucket: hotness,
                     brightness_bucket,
+                    head_brightness_bucket,
                 });
             }
         }
 
         self.tick = self.tick.wrapping_add(1);
-        self.phase = (self.phase + speed) % self.height.max(1) as f64;
+        for column in &mut self.columns {
+            column.phase = (column.phase + speed * column.speed_scale) % self.height.max(1) as f64;
+        }
 
         Frame {
             width: self.width,
@@ -185,7 +196,7 @@ impl RainEngine {
     }
 
     fn column_noise(&self, x: usize) -> f64 {
-        (((x as u64 * 1_103_515_245 + self.rng.seed) >> 16) & 0xff) as f64 / 255.0
+        (((x as u64 * 1_103_515_245 + self.columns[x].seed) >> 16) & 0xff) as f64 / 255.0
     }
 
     fn glyph_for(&self, x: usize, y: usize, glyph_churn: f64, glyph_set: GlyphSet) -> char {
@@ -203,10 +214,18 @@ impl RainEngine {
         };
 
         let churn = (glyph_churn * 32.0) as u64;
-        let index = (x as u64 * 17 + y as u64 * 31 + self.tick * churn + self.rng.seed) as usize
+        let index = (x as u64 * 17 + y as u64 * 31 + self.tick * churn + self.columns[x].seed)
+            as usize
             % glyphs.len();
         glyphs[index]
     }
+}
+
+#[derive(Debug, Clone)]
+struct ColumnState {
+    phase: f64,
+    speed_scale: f64,
+    seed: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -296,6 +315,74 @@ mod tests {
             .iter()
             .filter(|cell| cell.glyph != ' ')
             .all(|cell| cell.glyph.is_ascii()));
+    }
+
+    #[test]
+    fn rain_head_is_marked_separately_from_trail() {
+        let mut engine = RainEngine::new(1, 4, 7);
+        let state = EffectState {
+            density: 1.0,
+            fade_length: 4.0,
+            brightness: 1.0,
+            speed: 0.0,
+            ..EffectState::default()
+        };
+
+        let frame = engine.step(state);
+        let head_cells = frame
+            .cells
+            .iter()
+            .filter(|cell| cell.head_brightness_bucket > 0)
+            .count();
+        let trail_cells = frame
+            .cells
+            .iter()
+            .filter(|cell| cell.brightness_bucket > 0 && cell.head_brightness_bucket == 0)
+            .count();
+
+        assert_eq!(head_cells, 1);
+        assert!(trail_cells > 0);
+    }
+
+    #[test]
+    fn rain_head_glyph_flickers_even_with_low_global_churn() {
+        let mut engine = RainEngine::new(1, 4, 7);
+        let state = EffectState {
+            density: 1.0,
+            fade_length: 1.0,
+            brightness: 1.0,
+            speed: 0.0,
+            glyph_churn: 0.0,
+            ..EffectState::default()
+        };
+
+        let first = engine.step(state);
+        let second = engine.step(state);
+
+        assert_ne!(first.cells[0].glyph, second.cells[0].glyph);
+    }
+
+    #[test]
+    fn column_heads_drift_independently_over_time() {
+        let mut engine = RainEngine::new(2, 32, 7);
+        let state = EffectState {
+            density: 1.0,
+            fade_length: 1.0,
+            brightness: 1.0,
+            speed: 1.0,
+            ..EffectState::default()
+        };
+
+        let first = engine.step(state);
+        for _ in 0..20 {
+            engine.step(state);
+        }
+        let later = engine.step(state);
+
+        assert_ne!(
+            head_distance_between_columns(&first, 0, 1),
+            head_distance_between_columns(&later, 0, 1)
+        );
     }
 
     #[test]
@@ -420,6 +507,23 @@ mod tests {
             .enumerate()
             .max_by_key(|(_, cell)| cell.brightness_bucket)
             .map(|(index, _)| index / frame.width)
+            .unwrap()
+    }
+
+    fn head_distance_between_columns(frame: &Frame, left: usize, right: usize) -> usize {
+        let left_head = head_row(frame, left);
+        let right_head = head_row(frame, right);
+        forward_distance(left_head, right_head, frame.height)
+    }
+
+    fn head_row(frame: &Frame, x: usize) -> usize {
+        frame
+            .cells
+            .iter()
+            .enumerate()
+            .filter(|(index, cell)| index % frame.width == x && cell.head_brightness_bucket > 0)
+            .map(|(index, _)| index / frame.width)
+            .next()
             .unwrap()
     }
 

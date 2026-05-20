@@ -16,7 +16,7 @@ impl Default for AppConfig {
         let mut mappings = BTreeMap::new();
         mappings.insert(
             VisualAttribute::Speed,
-            MappingExpression::new("cpu.normalized * 8 + 1").unwrap(),
+            MappingExpression::new("cpu.normalized * 4 + 0.35").unwrap(),
         );
         mappings.insert(
             VisualAttribute::Density,
@@ -180,5 +180,16 @@ mod tests {
         assert_eq!(state.speed, 5.0);
         assert_eq!(state.color_hotness, 0.7);
         assert_eq!(state.brightness, 0.75);
+    }
+
+    #[test]
+    fn default_speed_mapping_has_slower_baseline() {
+        let config = AppConfig::default();
+        let mut metrics = MetricRegistry::default();
+        metrics.set("cpu", MetricValue::new(None, Some(0.0)));
+
+        let state = config.evaluate_effect_state(&metrics).unwrap();
+
+        assert_eq!(state.speed, 0.35);
     }
 }
