@@ -106,10 +106,10 @@ impl Default for EffectState {
             fade_length: 8.0,
             glyph_churn: 0.25,
             message_reveal_intensity: 0.0,
-            ember_density: 0.25,
+            ember_density: 0.04,
             ember_brightness: 0.9,
             ember_color_hotness: 0.0,
-            ember_fade_length: 7.0,
+            ember_fade_length: 28.0,
             glyph_set: GlyphSet::Unicode,
         }
     }
@@ -199,6 +199,8 @@ impl RainEngine {
                 };
                 let glyph = if brightness_bucket == 0 {
                     ' '
+                } else if ember_brightness > 0.0 && rain_brightness == 0.0 {
+                    self.stable_ember_glyph_for(x, y, state.glyph_set)
                 } else {
                     let local_churn =
                         (glyph_churn + trail * 0.75 + ember_brightness).clamp(0.0, 1.0);
@@ -253,6 +255,23 @@ impl RainEngine {
         glyphs[index]
     }
 
+    fn stable_ember_glyph_for(&self, x: usize, y: usize, glyph_set: GlyphSet) -> char {
+        const UNICODE_GLYPHS: &[char] = &[
+            '0', '1', '3', '7', '9', 'a', 'b', 'x', 'z', 'ﾊ', 'ﾐ', 'ﾋ', 'ｰ', 'ｳ', 'ｼ', 'ﾅ', 'ﾓ',
+            'ﾆ',
+        ];
+        const ASCII_GLYPHS: &[char] = &[
+            '0', '1', '3', '7', '9', 'a', 'b', 'x', 'z', '+', '-', '*', '/', '|', ':', '.', '=',
+            '#',
+        ];
+        let glyphs = match glyph_set {
+            GlyphSet::Unicode => UNICODE_GLYPHS,
+            GlyphSet::Ascii => ASCII_GLYPHS,
+        };
+
+        glyphs[self.cell_hash(x, y) as usize % glyphs.len()]
+    }
+
     fn ember_brightness(
         &self,
         x: usize,
@@ -281,7 +300,7 @@ impl RainEngine {
 
 fn ember_period(density: f64) -> u64 {
     let density = density.clamp(0.0, 1.0);
-    (512.0 - density * 448.0).round().max(16.0) as u64
+    (4096.0 - density * 3968.0).round().max(64.0) as u64
 }
 
 #[derive(Debug, Clone)]
@@ -382,6 +401,63 @@ mod tests {
 
         assert!(pop_glyphs > 0);
         assert!(pop_glyphs < frame.cells.len() / 12);
+    }
+
+    #[test]
+    fn default_embers_are_rare_and_slow_fading() {
+        let state = EffectState::default();
+
+        assert_eq!(state.ember_density, 0.04);
+        assert_eq!(state.ember_fade_length, 28.0);
+    }
+
+    #[test]
+    fn ember_glyph_stays_stable_through_short_fade_window() {
+        let mut engine = RainEngine::new(60, 18, 7);
+        let state = EffectState {
+            density: 0.0,
+            ember_density: 1.0,
+            ember_fade_length: 28.0,
+            ember_brightness: 1.0,
+            glyph_churn: 1.0,
+            speed: 0.0,
+            glyph_set: GlyphSet::Ascii,
+            ..EffectState::default()
+        };
+        let mut visible_index = None;
+        let mut first_frame = None;
+
+        for _ in 0..64 {
+            let frame = engine.step(state);
+            if let Some(index) = frame
+                .cells
+                .iter()
+                .position(|cell| cell.ember_brightness_bucket > 0)
+            {
+                visible_index = Some(index);
+                first_frame = Some(frame);
+                break;
+            }
+        }
+
+        let index = visible_index.expect("expected a visible ember");
+        let first_glyph = first_frame.unwrap().cells[index].glyph;
+        let mut changes = 0;
+        let mut previous = first_glyph;
+
+        for _ in 0..27 {
+            let frame = engine.step(state);
+            let cell = &frame.cells[index];
+            if cell.ember_brightness_bucket == 0 {
+                break;
+            }
+            if cell.glyph != previous {
+                changes += 1;
+                previous = cell.glyph;
+            }
+        }
+
+        assert!(changes <= 2, "ember glyph changed {changes} times");
     }
 
     #[test]
