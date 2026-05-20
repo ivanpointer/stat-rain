@@ -195,6 +195,7 @@ impl RainEngine {
                 let column = &self.columns[x];
                 let mut best_trail = 0.0;
                 let mut best_trace_seed = column.seed;
+                let mut best_trace_speed = 1.0;
                 let mut rain_head = false;
                 for trace in &column.traces {
                     if density * trace.density_scale < self.trace_noise(x, trace) {
@@ -206,13 +207,15 @@ impl RainEngine {
                     } else {
                         self.height + head - y
                     };
-                    let trail = (1.0 - distance as f64 / fade_length).clamp(0.0, 1.0);
+                    let trace_fade_length = trace_fade_length(fade_length, trace.speed_scale);
+                    let trail = (1.0 - distance as f64 / trace_fade_length).clamp(0.0, 1.0);
                     if distance == 0 {
                         rain_head = true;
                     }
                     if trail > best_trail {
                         best_trail = trail;
                         best_trace_seed = trace.seed;
+                        best_trace_speed = trace.speed_scale;
                     }
                 }
                 let rain_brightness = best_trail * state.brightness;
@@ -239,8 +242,7 @@ impl RainEngine {
                 } else if ember_brightness > 0.0 && rain_brightness == 0.0 {
                     self.ember_glyph_for(x, y, state.ember_density, state.glyph_set)
                 } else {
-                    let local_churn =
-                        (glyph_churn + best_trail * 0.75 + ember_brightness).clamp(0.0, 1.0);
+                    let local_churn = tail_glyph_churn(glyph_churn, best_trace_speed, best_trail);
                     self.glyph_for(x, y, local_churn, state.glyph_set, best_trace_seed)
                 };
 
@@ -386,6 +388,17 @@ fn mix_hash(value: u64) -> u64 {
 
 fn trace_speed_scale(seed: u64) -> f64 {
     0.45 + (mix_hash(seed) % 140) as f64 / 100.0
+}
+
+fn trace_fade_length(base_fade_length: f64, speed_scale: f64) -> f64 {
+    let speed_factor = ((speed_scale - 0.45) / 1.4).clamp(0.0, 1.0);
+    base_fade_length.max(1.0) * (0.6 + speed_factor * 0.55)
+}
+
+fn tail_glyph_churn(base_churn: f64, speed_scale: f64, trail: f64) -> f64 {
+    let speed_factor = ((speed_scale - 0.45) / 1.4).clamp(0.0, 1.0);
+    let freshness = trail.clamp(0.0, 1.0);
+    (base_churn * 0.35 + speed_factor * 0.35 + freshness * 0.55).clamp(0.0, 1.0)
 }
 
 #[derive(Debug, Clone)]
@@ -562,7 +575,10 @@ mod tests {
             .filter(|cell| cell.brightness_bucket > 0)
             .count();
 
-        assert!((10..20).contains(&visible_cells));
+        assert!(
+            (8..20).contains(&visible_cells),
+            "visible cells: {visible_cells}"
+        );
     }
 
     #[test]
@@ -610,6 +626,27 @@ mod tests {
             .map(|trace| trace.seed)
             .collect::<Vec<_>>();
         assert_ne!(first_seeds, later_seeds);
+    }
+
+    #[test]
+    fn faster_traces_have_longer_tails() {
+        let base_fade = 14.0;
+
+        assert!(trace_fade_length(base_fade, 1.6) > trace_fade_length(base_fade, 0.5));
+        assert!(trace_fade_length(base_fade, 1.6) <= base_fade * 1.5);
+        assert!(trace_fade_length(base_fade, 0.5) >= base_fade * 0.6);
+    }
+
+    #[test]
+    fn tail_glyph_churn_falls_as_tail_fades() {
+        let base_churn = 0.25;
+
+        let head_churn = tail_glyph_churn(base_churn, 1.5, 1.0);
+        let dim_tail_churn = tail_glyph_churn(base_churn, 1.5, 0.15);
+        let slow_head_churn = tail_glyph_churn(base_churn, 0.5, 1.0);
+
+        assert!(head_churn > dim_tail_churn);
+        assert!(head_churn > slow_head_churn);
     }
 
     #[test]
