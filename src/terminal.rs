@@ -80,13 +80,69 @@ pub fn write_exit(mut output: impl Write, alternate_screen: bool) -> Result<()> 
 }
 
 pub fn write_frame(mut output: impl Write, frame: &Frame, color_mode: ColorMode) -> Result<()> {
+    let mut renderer = FrameRenderer::new(color_mode);
+    renderer.write_frame(&mut output, frame)
+}
+
+#[derive(Debug, Clone)]
+pub struct FrameRenderer {
+    color_mode: ColorMode,
+    previous: Option<Frame>,
+}
+
+impl FrameRenderer {
+    pub fn new(color_mode: ColorMode) -> Self {
+        Self {
+            color_mode,
+            previous: None,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.previous = None;
+    }
+
+    pub fn write_frame(&mut self, mut output: impl Write, frame: &Frame) -> Result<()> {
+        let previous = self.previous.as_ref();
+
+        for y in 0..frame.height {
+            for x in 0..frame.width {
+                let index = y * frame.width + x;
+                let cell = &frame.cells[index];
+                if previous
+                    .and_then(|previous| previous.cells.get(index))
+                    .is_some_and(|previous_cell| previous_cell == cell)
+                {
+                    continue;
+                }
+                write_cell(&mut output, x, y, cell, self.color_mode)?;
+            }
+        }
+
+        self.previous = Some(frame.clone());
+        write!(output, "\x1b[0m")?;
+        output.flush()
+    }
+}
+
+fn write_cell(
+    mut output: impl Write,
+    x: usize,
+    y: usize,
+    cell: &RenderCell,
+    color_mode: ColorMode,
+) -> Result<()> {
+    write!(output, "\x1b[{};{}H", y + 1, x + 1)?;
+    write_color(&mut output, cell, color_mode)?;
+    write!(output, "{}", cell.glyph)
+}
+
+pub fn write_full_frame(mut output: impl Write, frame: &Frame, color_mode: ColorMode) -> Result<()> {
     for y in 0..frame.height {
         for x in 0..frame.width {
             let index = y * frame.width + x;
             let cell = &frame.cells[index];
-            write!(output, "\x1b[{};{}H", y + 1, x + 1)?;
-            write_color(&mut output, cell, color_mode)?;
-            write!(output, "{}", cell.glyph)?;
+            write_cell(&mut output, x, y, cell, color_mode)?;
         }
     }
     write!(output, "\x1b[0m")?;
@@ -220,6 +276,34 @@ mod tests {
         assert!(rendered.contains('0'));
         assert!(rendered.contains("\x1b[1;2H"));
         assert!(rendered.contains('1'));
+    }
+
+    #[test]
+    fn frame_renderer_skips_unchanged_cells_after_first_frame() {
+        let frame = Frame {
+            width: 2,
+            height: 1,
+            cells: vec![
+                RenderCell {
+                    glyph: '0',
+                    color_hotness_bucket: 0,
+                    brightness_bucket: 255,
+                },
+                RenderCell {
+                    glyph: '1',
+                    color_hotness_bucket: 0,
+                    brightness_bucket: 255,
+                },
+            ],
+        };
+        let mut renderer = FrameRenderer::new(ColorMode::Ansi16);
+        let mut output = Vec::new();
+
+        renderer.write_frame(&mut output, &frame).unwrap();
+        output.clear();
+        renderer.write_frame(&mut output, &frame).unwrap();
+
+        assert_eq!(String::from_utf8(output).unwrap(), "\x1b[0m");
     }
 
     #[test]
