@@ -79,6 +79,11 @@ pub fn write_exit(mut output: impl Write, alternate_screen: bool) -> Result<()> 
     output.flush()
 }
 
+pub fn write_clear(mut output: impl Write) -> Result<()> {
+    write!(output, "\x1b[2J\x1b[H")?;
+    output.flush()
+}
+
 pub fn write_frame(mut output: impl Write, frame: &Frame, color_mode: ColorMode) -> Result<()> {
     let mut renderer = FrameRenderer::new(color_mode);
     renderer.write_frame(&mut output, frame)
