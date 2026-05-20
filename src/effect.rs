@@ -170,7 +170,7 @@ impl MessageOverlay {
     }
 
     fn lifetime(&self) -> u64 {
-        self.fade_in + self.stay + self.fade_out.max(1)
+        self.fade_in + self.stay + self.fade_out.max(1) + self.fade_out / 2 + self.fade_out / 5
     }
 }
 
@@ -236,18 +236,45 @@ fn message_glyph_and_brightness(
         return Some((target, bucket(max_brightness)));
     }
 
+    let fade_delay = message_fade_delay(message.fade_out, char_hash);
     let fade_age = message.age.saturating_sub(stay_end);
+    if fade_age < fade_delay {
+        return Some((target, bucket(max_brightness)));
+    }
+    let fade_age = fade_age - fade_delay;
     let fade_length = jittered_message_fade(message.fade_out, char_hash);
     if fade_age >= fade_length {
         return None;
     }
     let brightness = (1.0 - fade_age as f64 / fade_length as f64) * max_brightness;
-    Some((target, bucket(brightness)))
+    let progress = fade_age as f64 / fade_length as f64;
+    let glyph = if message_should_glitch(offset, message.age, char_hash, progress) {
+        message_noise_glyph(offset, message.age, char_hash)
+    } else {
+        target
+    };
+    Some((glyph, bucket(brightness)))
 }
 
 fn jittered_message_fade(base: u64, hash: u64) -> u64 {
     let base = base.max(1);
     base + (mix_hash(hash) % (base / 2 + 1))
+}
+
+fn message_fade_delay(base: u64, hash: u64) -> u64 {
+    if base <= 1 {
+        return 0;
+    }
+    mix_hash(hash ^ 0xfeed_fade) % (base / 5 + 1)
+}
+
+fn message_should_glitch(offset: usize, age: u64, hash: u64, progress: f64) -> bool {
+    if progress < 0.15 {
+        return false;
+    }
+    let roll = mix_hash(hash ^ age.wrapping_mul(17) ^ (offset as u64).wrapping_mul(31)) % 100;
+    let threshold = 18 + (progress.clamp(0.0, 1.0) * 55.0) as u64;
+    roll < threshold
 }
 
 fn message_noise_glyph(offset: usize, age: u64, hash: u64) -> char {
@@ -1005,6 +1032,52 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(brightnesses.len() > 1);
         assert!(brightnesses.iter().min() != brightnesses.iter().max());
+    }
+
+    #[test]
+    fn message_overlay_staggers_fade_out_start_by_character() {
+        let mut frame = Frame {
+            width: 12,
+            height: 5,
+            cells: vec![blank_cell(); 60],
+        };
+        let message = MessageOverlay {
+            age: 68,
+            ..MessageOverlay::new("ALERT".to_string(), 0, 60, 60, 7)
+        };
+
+        apply_message_overlay(&mut frame, &message, 0.0);
+
+        let brightnesses = frame
+            .cells
+            .iter()
+            .filter(|cell| cell.head_brightness_bucket > 0)
+            .map(|cell| cell.head_brightness_bucket)
+            .collect::<Vec<_>>();
+        assert!(brightnesses
+            .iter()
+            .any(|brightness| *brightness == bucket(0.72)));
+        assert!(brightnesses
+            .iter()
+            .any(|brightness| *brightness < bucket(0.72)));
+    }
+
+    #[test]
+    fn message_overlay_glitches_some_letters_during_fade_out() {
+        let mut frame = Frame {
+            width: 12,
+            height: 5,
+            cells: vec![blank_cell(); 60],
+        };
+        let message = MessageOverlay {
+            age: 115,
+            ..MessageOverlay::new("ALERTALERT".to_string(), 0, 60, 60, 7)
+        };
+
+        apply_message_overlay(&mut frame, &message, 0.0);
+
+        let rendered = rendered_message_chars(&frame);
+        assert_ne!(rendered, "ALERTALERT");
     }
 
     #[test]
