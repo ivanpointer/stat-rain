@@ -17,7 +17,29 @@ make build
 make test
 make bench
 make run
+make run-fake-hot
+make stress-cpu
 make fmt
+```
+
+For visual tuning, `stat-rain run` can override live metrics with synthetic
+values:
+
+```sh
+cargo run -- run \
+  --simulate-metric cpu=1.0 \
+  --simulate-metric memory=0.9 \
+  --simulate-metric thermal_zone=95:0.95
+```
+
+Use `name=normalized` for metrics that only need a normalized value, or
+`name=raw:normalized` when a mapping uses both. The `cpu` override also updates
+the `cpu.total` alias.
+
+To create real CPU pressure while watching another pane, run:
+
+```sh
+cargo run -- stress-cpu --threads 8 --duration-seconds 30
 ```
 
 `devbox` provides the project toolchain when available:

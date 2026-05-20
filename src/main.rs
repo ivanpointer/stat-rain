@@ -1,6 +1,7 @@
 use anyhow::Result;
-use stat_rain::cli::{Cli, Command, RunArgs};
+use stat_rain::cli::{Cli, Command, RunArgs, StressCpuArgs};
 use stat_rain::config::AppConfig;
+use stat_rain::dev_tools;
 use stat_rain::effect::{EffectSmoother, GlyphSet};
 use stat_rain::metrics::{MetricProvider, MetricRegistry, MetricValue};
 use stat_rain::system_metrics::BuiltinSystemProvider;
@@ -23,6 +24,7 @@ fn main() -> Result<()> {
         Command::Send(_) => {
             println!("stat-rain send scaffold");
         }
+        Command::StressCpu(args) => stress_cpu(args)?,
     }
 
     Ok(())
@@ -34,9 +36,11 @@ fn run(args: RunArgs) -> Result<()> {
 
 pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
     let config = load_config(&args)?;
+    let simulated_metrics = dev_tools::parse_simulated_metrics(&args.simulated_metrics)?;
     let mut metrics = initial_metric_registry();
     let mut provider = BuiltinSystemProvider::new();
     sample_builtin_metrics(&mut provider, &mut metrics);
+    dev_tools::apply_simulated_metrics(&mut metrics, &simulated_metrics);
     let metric_interval = Duration::from_millis(args.metric_sample_ms);
     let mut last_metric_sample = Instant::now();
     let mut last_frame = Instant::now();
@@ -62,6 +66,7 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
         }
         if last_metric_sample.elapsed() >= metric_interval {
             sample_builtin_metrics(&mut provider, &mut metrics);
+            dev_tools::apply_simulated_metrics(&mut metrics, &simulated_metrics);
             last_metric_sample = Instant::now();
         }
         let now = Instant::now();
@@ -87,6 +92,22 @@ pub fn run_with_writer(args: RunArgs, output: &mut impl Write) -> Result<()> {
     }
     terminal::write_exit(&mut *output, alternate_screen)?;
 
+    Ok(())
+}
+
+fn stress_cpu(args: StressCpuArgs) -> Result<()> {
+    let duration = Duration::from_secs(args.duration_seconds);
+    let started = Instant::now();
+    eprintln!(
+        "stressing CPU with {} Fibonacci worker(s) for {}s; press Ctrl-C to stop the process",
+        args.threads.max(1),
+        args.duration_seconds
+    );
+    let iterations = dev_tools::run_cpu_stress(args.threads, duration, args.fib_n);
+    eprintln!(
+        "completed {iterations} Fibonacci iteration(s) in {:.2}s",
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 

@@ -14,6 +14,7 @@ pub enum Command {
     Run(RunArgs),
     Init(InitArgs),
     Send(SendArgs),
+    StressCpu(StressCpuArgs),
 }
 
 #[derive(Debug, Args)]
@@ -29,6 +30,9 @@ pub struct RunArgs {
 
     #[arg(long = "map")]
     pub mappings: Vec<String>,
+
+    #[arg(long = "simulate-metric")]
+    pub simulated_metrics: Vec<String>,
 
     #[arg(long)]
     pub frames: Option<u64>,
@@ -77,6 +81,24 @@ pub struct SendArgs {
 
     #[arg(long)]
     pub message: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct StressCpuArgs {
+    #[arg(long, default_value_t = default_stress_threads())]
+    pub threads: usize,
+
+    #[arg(long = "duration-seconds", default_value_t = 30)]
+    pub duration_seconds: u64,
+
+    #[arg(long = "fib-n", default_value_t = 35)]
+    pub fib_n: u32,
+}
+
+fn default_stress_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
 }
 
 impl Cli {
