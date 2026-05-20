@@ -16,7 +16,7 @@
 - `README.md`: concise project overview and local commands.
 - `devbox.json`: project-scoped Rust, Cargo, Make, and profiling tools.
 - `Makefile`: main command surface for build/test/bench/profile/run/fmt.
-- `Cargo.toml`: binary crate metadata, dependencies, dev dependencies, bench config.
+- `Cargo.toml`: binary crate metadata, dependencies, dev dependencies, and later bench config.
 - `src/main.rs`: CLI entrypoint.
 - `src/cli.rs`: subcommand and flag parsing.
 - `src/config.rs`: typed config model, defaults, profile merge, inline TOML merge, CLI mapping overrides.
@@ -179,10 +179,6 @@ toml = "0.8"
 [dev-dependencies]
 criterion = "0.5"
 tempfile = "3.10"
-
-[[bench]]
-name = "render_loop"
-harness = false
 ```
 
 Create `src/lib.rs`:
@@ -889,11 +885,21 @@ Expected: commit succeeds.
 ## Task 5: Examples And Benchmark Harness
 
 **Files:**
+- Modify: `Cargo.toml`
 - Create: `examples/stat-rain.toml`
 - Create: `examples/adapters/stdin-text-to-socket.sh`
 - Create: `benches/render_loop.rs`
 
 - [ ] **Step 1: Add starter config and benchmark**
+
+Append to `Cargo.toml`:
+
+```toml
+
+[[bench]]
+name = "render_loop"
+harness = false
+```
 
 Create `examples/stat-rain.toml`:
 
