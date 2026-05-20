@@ -4,7 +4,7 @@
 
 The first version is a passive visual monitor for tmux-style panes. It maps metrics to rain attributes such as speed, density, hotness, brightness, fade length, glyph churn, and message reveal intensity.
 
-Metric-driven effect changes are smoothed over a 10 second window by default. Use `--effect-smoothing-ms` to tune that window, or set it to `0` for immediate changes.
+Metric-driven effect changes are smoothed over a 4 second window by default. Use `--effect-smoothing-ms` to tune that window, or set it to `0` for immediate changes.
 
 The built-in `cpu` metric is aggregate CPU usage across the machine. `cpu.total` is also exposed as an explicit alias for configs that should make that aggregate behavior obvious.
 

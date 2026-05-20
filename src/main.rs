@@ -715,7 +715,7 @@ mod tests {
             frames: None,
             frame_delay_ms: 33,
             metric_sample_ms: 1_000,
-            effect_smoothing_ms: 10_000,
+            effect_smoothing_ms: 4_000,
             message_fade_in_ms: 100,
             message_stay_ms: 300,
             message_wash_ms: 500,

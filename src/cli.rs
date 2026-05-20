@@ -47,7 +47,7 @@ pub struct RunArgs {
     #[arg(long = "metric-sample-ms", default_value_t = 1_000)]
     pub metric_sample_ms: u64,
 
-    #[arg(long = "effect-smoothing-ms", default_value_t = 10_000)]
+    #[arg(long = "effect-smoothing-ms", default_value_t = 4_000)]
     pub effect_smoothing_ms: u64,
 
     #[arg(long = "message-fade-in-ms", default_value_t = 1_500)]
@@ -135,5 +135,20 @@ fn default_stress_threads() -> usize {
 impl Cli {
     pub fn parse_args() -> Self {
         Self::parse()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_defaults_to_four_second_effect_smoothing() {
+        let cli = Cli::parse_from(["stat-rain", "run"]);
+
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args.effect_smoothing_ms, 4_000);
     }
 }
